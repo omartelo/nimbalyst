@@ -60,6 +60,14 @@ export interface DiffState {
   oldContent: string;
   /** Content after the AI edit (currently on disk). */
   newContent: string;
+  /**
+   * Stable fingerprint of `newContent`. Editors compare this against the
+   * hash of the diff they last applied to decide whether an incoming diff
+   * request is a duplicate of the in-flight one or a fresh subsequent edit
+   * (which can carry the same `tagId` because HistoryManager enforces a
+   * single pending tag per file/session).
+   */
+  newContentHash: string;
   /** Timestamp when the AI edit was detected. */
   createdAt: number;
 }
@@ -123,6 +131,23 @@ export interface DocumentModelEditorHandle {
    * DocumentModel saves the final content and notifies all other editors.
    */
   resolveDiff(accepted: boolean): Promise<void>;
+
+  /**
+   * Tell the DocumentModel that the editor has finished applying the current diff target.
+   * The DocumentModel transitions the DiffSession from `applying` to `applied` and drains
+   * any payload that was queued during the apply -- if a fresh payload was waiting, the
+   * model fires `onDiffRequested` again with the drained content. Editors must call this
+   * after their own apply work settles, otherwise the queue never drains.
+   */
+  markDiffApplied(): void;
+
+  /**
+   * Notify the DocumentModel that the user has just accepted/rejected a single change
+   * group and a new incremental-approval tag has been written. The session is rotated
+   * onto the new tag id and re-baselined so a subsequent file-watcher event for the same
+   * file diffs against the post-partial state, not the original baseline.
+   */
+  completePartialResolve(input: { newTagId: string; newBaseline: string }): void;
 
   /**
    * Detach this editor from the DocumentModel.

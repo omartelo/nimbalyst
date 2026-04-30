@@ -49,6 +49,8 @@ import { UnifiedEditorHeaderBar } from './UnifiedEditorHeaderBar';
 import { usePersonalDocSync } from '../../hooks/usePersonalDocSync';
 import { useDocumentModel } from '../../services/document-model/useDocumentModel';
 import { DocumentModelRegistry } from '../../services/document-model/DocumentModelRegistry';
+import type { DiffState } from '../../services/document-model/types';
+import { diffTrace } from '@nimbalyst/runtime/utils/debugFlags';
 
 /** Normalize a file path for comparison: backslashes to forward slashes, strip trailing slashes. */
 function normalizePathForCompare(p: string): string {
@@ -955,7 +957,7 @@ export const TabEditor: React.FC<TabEditorProps> = ({
       handle.onFileChanged((content) => {
         if (typeof content !== 'string') return;
 
-        console.log('[diff-trace] TabEditor.onFileChanged fired', {
+        diffTrace('TabEditor.onFileChanged fired', {
           filePath,
           isCustom,
           isMarkdown,
@@ -977,7 +979,7 @@ export const TabEditor: React.FC<TabEditorProps> = ({
         // Also bail if a pending AI edit tag is already tracked for this tab —
         // diff resolution will route the final content through notifyFileChanged.
         if (isApplyingDiffRef.current || pendingAIEditTagRef.current) {
-          console.log('[diff-trace] TabEditor.onFileChanged SKIP (diff in flight)', {
+          diffTrace('TabEditor.onFileChanged SKIP (diff in flight)', {
             filePath,
             isApplyingDiff: isApplyingDiffRef.current,
             hasPendingTag: !!pendingAIEditTagRef.current,
@@ -991,7 +993,7 @@ export const TabEditor: React.FC<TabEditorProps> = ({
         // (e.g. when a sibling saves content we already have).
         if (content === lastSavedContentRef.current) return;
 
-        console.log('[diff-trace] TabEditor.onFileChanged WILL REPLACE editor content', {
+        diffTrace('TabEditor.onFileChanged WILL REPLACE editor content', {
           filePath,
           isApplyingDiff: isApplyingDiffRef.current,
           t: performance.now(),
@@ -1031,150 +1033,140 @@ export const TabEditor: React.FC<TabEditorProps> = ({
       }),
     );
 
-    // --- Diff mode: DocumentModel calls onDiffRequested when AI edits detected ---
-    cleanups.push(
-      handle.onDiffRequested((diffState) => {
-        const { tagId, sessionId, oldContent, newContent, createdAt } = diffState;
-        const tagInfo = { tagId, sessionId, filePath };
+    // --- Diff mode: DocumentModel calls onDiffRequested only when there's new work ---
+    //
+    // DocumentModel runs the DiffSession state machine. It only fires onDiffRequested
+    // when the session transitions to `applying` with a fresh payload. Duplicates and
+    // in-flight queues are handled inside the model -- we just apply whatever shows up.
+    // After the editor finishes its replay we call `handle.markDiffApplied()` so the
+    // model can transition to `applied` and drain any payload that arrived during the
+    // apply (the model will fire onDiffRequested again with the drained content).
+    const applyDiffState = async (state: DiffState): Promise<void> => {
+      const { tagId, sessionId, oldContent, newContent, createdAt } = state;
+      const tagInfo = { tagId, sessionId, filePath };
 
-        console.log('[diff-trace] TabEditor.onDiffRequested fired', {
-          filePath,
-          isCustom,
-          isMarkdown,
-          tagId,
-          oldLen: typeof oldContent === 'string' ? oldContent.length : -1,
-          oldHead: typeof oldContent === 'string' ? oldContent.slice(0, 80) : '',
-          newLen: typeof newContent === 'string' ? newContent.length : -1,
-          newHead: typeof newContent === 'string' ? newContent.slice(0, 80) : '',
-          sameOldNew: oldContent === newContent,
-          isApplyingDiff: isApplyingDiffRef.current,
-          alreadyTrackingTag: pendingAIEditTagRef.current?.tagId === tagId,
-          t: performance.now(),
-        });
+      isApplyingDiffRef.current = true;
+      setPendingAIEditTag(tagInfo);
 
-        // Coalesce: if a diff for this exact tag is already being applied or
-        // already on screen, skip the duplicate invocation. The two IPC events
-        // (history:pending-tag-created + file-changed-on-disk) both route through
-        // diff mode and would otherwise re-run the 250ms reset+dispatch, racing
-        // each other and leaving the editor in inconsistent states.
-        // The first event wins; the second is a no-op.
-        // Diff state is still kept fresh in DocumentModel for resolveDiff.
-        if (
-          (oldContent === newContent) ||
-          (pendingAIEditTagRef.current?.tagId === tagId && isApplyingDiffRef.current)
-        ) {
-          console.log('[diff-trace] TabEditor.onDiffRequested SKIP duplicate', {
-            filePath,
-            tagId,
-            sameOldNew: oldContent === newContent,
-            alreadyApplying: isApplyingDiffRef.current,
-            t: performance.now(),
-          });
-          return;
-        }
-
-        // Route through custom editor diff callback if available
+      try {
         if (diffRequestCallbackRef.current) {
-          isApplyingDiffRef.current = true;
-          (async () => {
-            try {
-              setPendingAIEditTag(tagInfo);
-              setShowCustomEditorDiffBar(true);
-              fetchDiffSessionInfo(sessionId, createdAt);
-              diffRequestCallbackRef.current!({
-                originalContent: oldContent,
-                modifiedContent: newContent,
-                tagId,
-                sessionId,
-              });
-              contentRef.current = oldContent;
-              initialContentRef.current = oldContent;
-              isDirtyRef.current = false;
-              onDirtyChange?.(false);
-              setReloadVersion((v) => v + 1);
-            } finally {
-              isApplyingDiffRef.current = false;
-            }
-          })();
-          return;
-        }
-
-        // Custom editor that declared no diff view: auto-accept so external edits flow
-        // through to the editor (via DocumentModel.notifyFileChanged after resolveDiff)
-        // instead of being swallowed by diff-mode routing.
-        if (isCustom && !customEditorSupportsDiffMode) {
+          // Custom editor with declared diff view
+          setShowCustomEditorDiffBar(true);
+          fetchDiffSessionInfo(sessionId, createdAt);
+          diffRequestCallbackRef.current({
+            originalContent: oldContent,
+            modifiedContent: newContent,
+            tagId,
+            sessionId,
+          });
+          contentRef.current = oldContent;
+          initialContentRef.current = oldContent;
+          isDirtyRef.current = false;
+          onDirtyChange?.(false);
+          setReloadVersion((v) => v + 1);
+        } else if (isCustom && !customEditorSupportsDiffMode) {
+          // Custom editor with no diff view: auto-accept so subsequent external edits flow
+          // through notifyFileChanged instead of being swallowed by diff-mode routing.
           contentRef.current = newContent;
           initialContentRef.current = newContent;
           lastSavedContentRef.current = newContent;
           isDirtyRef.current = false;
           onDirtyChange?.(false);
-          handle.resolveDiff(true).catch((err) => {
+          try {
+            await handle.resolveDiff(true);
+          } catch (err) {
             logger.ui.error('[TabEditor] Auto-accept diff failed for no-diff-view custom editor:', err);
-          });
+          }
+        } else {
+          // Built-in editor: Lexical or Monaco
+          contentRef.current = oldContent;
+
+          if (editorRef.current) {
+            if (isMarkdown) {
+              const transformers = getEditorTransformers();
+              diffTrace('TabEditor.applyDiffState resetting editor to oldContent', { filePath, oldLen: oldContent.length, t: performance.now() });
+              editorRef.current.update(() => {
+                const root = $getRoot();
+                root.clear();
+                $convertFromEnhancedMarkdownString(oldContent, transformers);
+              }, { tag: SKIP_SCROLL_INTO_VIEW_TAG });
+
+              await new Promise((resolve) => setTimeout(resolve, 250));
+
+              // Snapshot what's actually in the editor right before we dispatch,
+              // to catch races where onFileChanged replaced the content during the wait.
+              let preDispatchMarkdown = '';
+              try {
+                preDispatchMarkdown = editorRef.current.getEditorState().read(() => {
+                  return $convertToEnhancedMarkdownString(transformers);
+                });
+              } catch (err) {
+                diffTrace('TabEditor pre-dispatch read failed', err);
+              }
+              diffTrace('TabEditor.applyDiffState pre-dispatch editor state', {
+                filePath,
+                preDispatchLen: preDispatchMarkdown.length,
+                preDispatchHead: preDispatchMarkdown.slice(0, 80),
+                matchesOld: preDispatchMarkdown === oldContent,
+                matchesNew: preDispatchMarkdown === newContent,
+                t: performance.now(),
+              });
+
+              editorRef.current.dispatchCommand(APPLY_MARKDOWN_REPLACE_COMMAND, [{ newText: newContent }]);
+              fetchDiffSessionInfo(sessionId, createdAt);
+
+              await new Promise((resolve) => setTimeout(resolve, 100));
+              diffTrace('TabEditor.applyDiffState post-dispatch settle done', { filePath, t: performance.now() });
+            } else if (editorRef.current.showDiff) {
+              editorRef.current.showDiff(oldContent, newContent);
+              setShowMonacoDiffBar(true);
+              fetchDiffSessionInfo(sessionId, createdAt);
+            }
+          }
+
+          isDirtyRef.current = false;
+          onDirtyChange?.(false);
+          setReloadVersion((v) => v + 1);
+        }
+      } catch (error) {
+        logger.ui.error(`[TabEditor] Failed to apply DocumentModel diff:`, error);
+      } finally {
+        isApplyingDiffRef.current = false;
+        // Tell the model we're done so it can drain any payload that landed during apply.
+        // The model will fire onDiffRequested again if there was queued content.
+        try {
+          handle.markDiffApplied();
+        } catch (err) {
+          logger.ui.error('[TabEditor] markDiffApplied failed:', err);
+        }
+      }
+    };
+
+    cleanups.push(
+      handle.onDiffRequested((diffState) => {
+        const { tagId, oldContent, newContent, newContentHash } = diffState;
+
+        diffTrace('TabEditor.onDiffRequested fired', {
+          filePath,
+          isCustom,
+          isMarkdown,
+          tagId,
+          newContentHash,
+          newLen: typeof newContent === 'string' ? newContent.length : -1,
+          newHead: typeof newContent === 'string' ? newContent.slice(0, 80) : '',
+          sameOldNew: oldContent === newContent,
+          alreadyTrackingTag: pendingAIEditTagRef.current?.tagId === tagId,
+          t: performance.now(),
+        });
+
+        if (oldContent === newContent) {
+          diffTrace('TabEditor.onDiffRequested SKIP empty diff', { filePath, tagId, t: performance.now() });
+          // Tell the model the (empty) apply is done so its session doesn't sit in 'applying'.
+          handle.markDiffApplied();
           return;
         }
 
-        // Built-in editors: apply diff mode
-        isApplyingDiffRef.current = true;
-        setPendingAIEditTag(tagInfo);
-        contentRef.current = oldContent;
-
-        (async () => {
-          try {
-            if (editorRef.current) {
-              if (isMarkdown) {
-                // Lexical: load old content, then apply diff replacement
-                const transformers = getEditorTransformers();
-                console.log('[diff-trace] TabEditor.onDiffRequested resetting editor to oldContent', { filePath, oldLen: oldContent.length, t: performance.now() });
-                editorRef.current.update(() => {
-                  const root = $getRoot();
-                  root.clear();
-                  $convertFromEnhancedMarkdownString(oldContent, transformers);
-                }, { tag: SKIP_SCROLL_INTO_VIEW_TAG });
-
-                await new Promise((resolve) => setTimeout(resolve, 250));
-
-                // Snapshot what's actually in the editor right before we dispatch,
-                // to catch races where onFileChanged replaced the content during the wait.
-                let preDispatchMarkdown = '';
-                try {
-                  preDispatchMarkdown = editorRef.current.getEditorState().read(() => {
-                    return $convertToEnhancedMarkdownString(transformers);
-                  });
-                } catch (err) {
-                  console.log('[diff-trace] TabEditor pre-dispatch read failed', err);
-                }
-                console.log('[diff-trace] TabEditor.onDiffRequested pre-dispatch editor state', {
-                  filePath,
-                  preDispatchLen: preDispatchMarkdown.length,
-                  preDispatchHead: preDispatchMarkdown.slice(0, 80),
-                  matchesOld: preDispatchMarkdown === oldContent,
-                  matchesNew: preDispatchMarkdown === newContent,
-                  t: performance.now(),
-                });
-
-                editorRef.current.dispatchCommand(APPLY_MARKDOWN_REPLACE_COMMAND, [{ newText: newContent }]);
-                fetchDiffSessionInfo(sessionId, createdAt);
-
-                await new Promise((resolve) => setTimeout(resolve, 100));
-                console.log('[diff-trace] TabEditor.onDiffRequested post-dispatch settle done', { filePath, t: performance.now() });
-              } else if (editorRef.current.showDiff) {
-                // Monaco: use built-in diff viewer
-                editorRef.current.showDiff(oldContent, newContent);
-                setShowMonacoDiffBar(true);
-                fetchDiffSessionInfo(sessionId, createdAt);
-              }
-            }
-
-            isDirtyRef.current = false;
-            onDirtyChange?.(false);
-            setReloadVersion((v) => v + 1);
-          } catch (error) {
-            logger.ui.error(`[TabEditor] Failed to apply DocumentModel diff:`, error);
-          } finally {
-            isApplyingDiffRef.current = false;
-          }
-        })();
+        void applyDiffState(diffState);
       }),
     );
 
@@ -1390,6 +1382,13 @@ export const TabEditor: React.FC<TabEditorProps> = ({
             tagId: newTagId,
             sessionId,
             filePath
+          });
+
+          // Tell DocumentModel about the rotation so its DiffSession re-baselines onto the new
+          // tag and the next file-watcher event diffs against the post-partial state.
+          documentModelHandleRef.current?.completePartialResolve({
+            newTagId,
+            newBaseline: rejectedContent,
           });
 
           // Update our state

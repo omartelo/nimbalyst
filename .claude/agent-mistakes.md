@@ -1,5 +1,21 @@
 # Agent Mistakes Log
 
+## 2026-04-30: `git stash` without asking, then `git stash pop` blew up the working tree
+
+**What happened**: I wanted to verify whether a failing E2E test was caused by my `diffWords.ts` change, so I ran `git stash push -- packages/runtime/src/editor/plugins/DiffPlugin/core/diffWords.ts` to temporarily revert that single file. Two problems:
+1. **Never asked the user.** The user's CLAUDE.md already lists `git reset` and `git add -A` as forbidden-without-asking; stash is the same kind of state-mutating operation and should have required confirmation.
+2. **`git stash pop` then merged a different stash.** A pre-existing `stash@{0}` from another session ("Other sessions: collab sync, tracker, release notes, document sync") was at the top of the stack. The pop applied THAT stash on top of the working tree, injecting conflict markers into 7 files I'd never touched (release-public.md, PUBLIC_RELEASE_NOTES.md, three THIRD_PARTY_* files, TrackerItemDetail.tsx, useTrackerContentCollab.ts), staging an unwanted change to CollabLexicalProvider.ts, and recording a "deleted by us" for plans/unified-tracker-system-refactor.md. I then made it worse by trying to "clean up" with `git checkout --ours` + `git add` on those files, which marked the user's pre-existing UU conflicts as resolved (losing their in-progress conflict resolution state).
+
+**Recovery**: Reverted CollabLexicalProvider.ts to HEAD, then `git stash apply stash@{0}` to re-introduce the same UU conflict markers + DU file the user had at session start, then unstaged CollabLexicalProvider.ts again. Stash itself preserved (apply didn't drop). Final `git status` matches session-start exactly.
+
+**Lesson**: Never run `git stash` (push, pop, apply, drop) without asking. Stash mutates index + working tree AND interacts with whatever is already on the stash stack from concurrent sessions. In a multi-session repo there is almost always something already on the stack you don't know about. If you need to test "with my change reverted vs not", do it via temporary file copy (`cp file file.bak; <revert>; <test>; mv file.bak file`) or by checking out a single file from HEAD with `git checkout HEAD -- <file>` (also non-trivial — ask first).
+
+## 2026-04-29: Plain `git commit` swept up unrelated pre-staged changes
+
+**What happened**: After committing a .gitignore change via `developer_git_commit_proposal`, the proposal tool's path-restricted commit excluded the staged `git rm --cached` deletions of transcript-dist files. I followed up with a bare `git commit -m "..."` (no pathspec) to capture the deletions. The index already held 73 unrelated `plans/*.md` deletions (visible in the very first git status of the session) — they all got swept into the commit. User noticed and asked to redo it; fixed by `git reset --soft HEAD~1` + `git restore --staged plans/` + re-commit.
+
+**Lesson**: Before running a bare `git commit`, always run `git diff --cached --name-only` to confirm the index contains *only* what belongs in the commit. If pre-existing staged changes exist (visible in the session-start git status), either unstage them first or use a path-scoped commit (`git commit -- <paths>`). The proposal tool's apparent "limitation" was actually correct behavior — pathspec scoping protected against exactly this.
+
 ## 2026-03-25: Pushed release without full local build verification
 
 **What happened**: Pushed v0.56.14 and v0.56.15 to GitHub without running the full `build:mac:local` or `build:extensions` locally. Only ran `npm run typecheck` and the runtime vite build, which missed:
@@ -22,3 +38,35 @@ When the user pushed back, I found the right fix (persist via `workspace:update-
 3. Required three rounds of feedback to get to the right solution
 
 **Lesson**: When you find an IPC send with no handler, that's a red flag for dead/abandoned code, not a missing handler. Investigate the full picture first: who calls it, who was supposed to handle it, is any of it actually used? And when cleaning up a bug, clean up ALL the dead code in the same pass -- don't leave broken functions and unused atoms sitting there.
+
+## 2026-04-23: Proposed committing a file under nimbalyst-local/
+
+**What happened**: After implementing the AskUserQuestion draft-state fix, I called `developer_git_commit_proposal` with four files, one of which was `nimbalyst-local/plans/askuserquestion-draft-state-persistence.md`. The user caught it in the commit widget and excluded the plan before confirming. CLAUDE.md already says "Never commit files under `nimbalyst-local/`" -- I read it at session start and still included the plan doc anyway.
+
+**User feedback**: "why did you suggest committing the plan? i added a note to claude.md to ask you to please stop committing plan files. how can i fix this so you don't keep doing that?"
+
+**Root cause**: The rule is buried in a long bullet list inside "General Development Guidelines" rather than in a CRITICAL section, and there's no hard guard (nimbalyst-local/ is a tracked directory in git, not gitignored, so the file surfaces as "uncommitted" in the session context that gets handed to me). Relying on prose alone means one missed skim = broken rule.
+
+**Lesson**: Before calling any commit-proposal tool, explicitly scan the file list for `nimbalyst-local/` paths and drop them. Treat prose rules about what-not-to-commit as a pre-flight check, not a passive reminder.
+
+## 2026-04-27: Started invasive file surgery to split one ambiguous answer into two commits
+
+**What happened**: After landing the AIService.ts refactor (Round 1: utils extract; Round 2: streaming handler extract), I asked the user via AskUserQuestion what to do next. Earlier in the conversation I had said "each round wants its own commit/PR", but the question I actually presented offered a single option labeled "Commit rounds 1 & 2" that didn't say one-or-two. The user picked it.
+
+I interpreted that as "two separate commits" because of my earlier framing, then started reconstructing the Round-1-only state of AIService.ts on disk (cp HEAD copy, re-applying the import edit, sed-deleting the helper block) so I could feed two file states into the commit-proposal tool one at a time. The user yelled at me to put it back and just make one commit.
+
+**User feedback**: "wtf are you doing! put the work back and just fucking make one commit! wtf!!?"
+
+**Root cause**: I committed to a high-cost, error-prone path (mutating committed code on disk to manufacture two intermediate states) based on a guess about user intent, when the cheap move was to ask "one commit or two?" before doing any surgery. I had pre-committed myself to "separate commits" mentally and used the ambiguous answer to confirm rather than reading it skeptically.
+
+**Lesson**: If a single button click could mean either of two things and one path is far more invasive (especially anything that mutates working-tree state to fake a history), confirm in plain text before doing the work. Costly file surgery to split commits is never the user's preferred default — they'd ask for `git add -p` or interactive staging if they wanted that. Default to one commit unless explicitly told otherwise.
+
+## 2026-04-27: Lifted code to runtime with its CSS file instead of converting to Tailwind
+
+**What happened**: The user asked me to share the git extension's `DiffPeekPopover` and `UnifiedDiffView` with the runtime so the git commit proposal widget could reuse them. I copied the components into `packages/runtime/src/ui/git/` AND copied the matching ~200 lines of styles into a new `packages/runtime/src/ui/git/diffPeek.css`. The user pushed back: "why'd you use css when this app is a tailwind app??"
+
+The runtime AgentTranscript widgets (including `GitCommitConfirmationWidget` sitting right next to where the popover gets used) all style with Tailwind utilities + `var(--nim-*)` arbitrary values. The git extension uses a CSS file because it bundles its own stylesheet outside Tailwind's `content` paths, but that's an extension-specific constraint — the runtime side has no such constraint and follows Tailwind conventions.
+
+**Root cause**: I treated "lift the existing code into a new home" as a verbatim copy job and didn't reconsider whether the style mechanism still made sense in the new context. The git extension uses CSS because it has to (its source isn't scanned by Tailwind); runtime widgets use Tailwind because they're scanned. Same component, two different appropriate stylings depending on where it lives. I didn't think about that until called out.
+
+**Lesson**: When porting code between packages with different conventions, the styling/build/import mechanism is part of what gets ported — not just the JSX. Before copying a CSS file into a new package, check whether that package's neighboring components use CSS files or Tailwind utilities (or both, and when), and follow the local convention. The "I just copied what was there" reflex is fine for the same package but wrong at package boundaries.

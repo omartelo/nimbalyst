@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
-import { getWorkspaceState, updateWorkspaceState, getTheme, getThemeSync, isCompletionSoundEnabled, setCompletionSoundEnabled, getCompletionSoundType, setCompletionSoundType, CompletionSoundType, getReleaseChannel, setReleaseChannel, ReleaseChannel, getRecentItems, getDefaultAIModel, setDefaultAIModel, getDefaultEffortLevel, setDefaultEffortLevel, isAnalyticsEnabled, setAnalyticsEnabled, getSessionSyncConfig, setSessionSyncConfig, SessionSyncConfig, isExtensionDevToolsEnabled, setExtensionDevToolsEnabled, getAppSetting, setAppSetting, getAlphaFeatures, setAlphaFeatures, getBetaFeatures, setBetaFeatures, getEnableAllBetaFeatures, setEnableAllBetaFeatures, getDeveloperFeatures, setDeveloperFeatures, isDeveloperFeatureAvailable, isShowTrayIcon } from '../utils/store';
+import { getWorkspaceState, updateWorkspaceState, getTheme, getThemeSync, isCompletionSoundEnabled, setCompletionSoundEnabled, getCompletionSoundType, setCompletionSoundType, CompletionSoundType, getReleaseChannel, setReleaseChannel, ReleaseChannel, getRecentItems, getDefaultAIModel, setDefaultAIModel, getDefaultEffortLevel, setDefaultEffortLevel, isAnalyticsEnabled, setAnalyticsEnabled, getSessionSyncConfig, setSessionSyncConfig, SessionSyncConfig, isExtensionDevToolsEnabled, setExtensionDevToolsEnabled, getAppSetting, setAppSetting, getAlphaFeatures, setAlphaFeatures, getBetaFeatures, setBetaFeatures, getEnableAllBetaFeatures, setEnableAllBetaFeatures, getDeveloperFeatures, setDeveloperFeatures, isDeveloperFeatureAvailable, isShowTrayIcon, getDebugFlags, setDebugFlags, type DebugFlags } from '../utils/store';
 import { getEnhancedPath } from '../services/CLIManager';
 import { logger } from '../utils/logger';
 import { SoundNotificationService } from '../services/SoundNotificationService';
@@ -293,6 +293,22 @@ export function registerSettingsHandlers() {
     // Check if a specific developer feature is available (developer mode + feature enabled)
     safeHandle('developer-features:is-available', (_event, tag: string) => {
         return isDeveloperFeatureAvailable(tag as any);
+    });
+
+    // Debug flags (verbose logging toggles, off by default)
+    safeHandle('debug-flags:get', () => {
+        return getDebugFlags();
+    });
+
+    safeHandle('debug-flags:set', (_event, flags: Partial<DebugFlags>) => {
+        setDebugFlags(flags);
+        // Mirror to all renderers so the in-renderer atom + window mirror stay in sync without
+        // a full reload. Renderers register a listener for 'debug-flags:changed'.
+        const next = getDebugFlags();
+        for (const win of BrowserWindow.getAllWindows()) {
+            win.webContents.send('debug-flags:changed', next);
+        }
+        logger.store.info('[SettingsHandlers] Debug flags updated:', next);
     });
 
     // Get recent projects

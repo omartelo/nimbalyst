@@ -25,6 +25,8 @@ import type {
   DiffState,
   ExternalChangeInfo,
 } from './types';
+import { diffTrace } from '@nimbalyst/runtime/utils/debugFlags';
+import { DiffSession } from './DiffSession';
 
 let nextAttachmentId = 0;
 
@@ -70,8 +72,20 @@ export class DocumentModel {
   /** Last content that was persisted to the backing store. */
   private lastPersistedContent: string | ArrayBuffer | null = null;
 
-  /** Diff state (pending AI edits). */
+  /**
+   * Diff state (pending AI edits).
+   *
+   * Always derived from `currentSession` when one exists. Kept as a separate field for
+   * backward compatibility with consumers that expect the flat `DiffState` shape; the
+   * `DiffSession` state machine is the single source of truth for lifecycle decisions.
+   */
   private diffState: DiffState | null = null;
+
+  /**
+   * State machine for the active diff lifecycle. `null` when no AI edit is pending.
+   * Owns the duplicate-suppression and re-baseline logic; see DiffSession.ts.
+   */
+  private currentSession: DiffSession | null = null;
 
   /** All attached editors. */
   private attachments = new Map<string, EditorAttachment>();
@@ -215,6 +229,14 @@ export class DocumentModel {
         await this.resolveDiffFromEditor(id, accepted);
       },
 
+      markDiffApplied: () => {
+        this.markDiffApplied();
+      },
+
+      completePartialResolve: (input: { newTagId: string; newBaseline: string }) => {
+        this.applyPartialResolve(input);
+      },
+
       detach: () => {
         this.detach(id);
       },
@@ -258,6 +280,15 @@ export class DocumentModel {
     return this.diffState;
   }
 
+  /**
+   * Snapshot of the active diff session, or `null` if not in diff mode.
+   * Exposes the state machine's phase + queued payload for consumers that need
+   * lifecycle visibility (e.g. tests, future TabEditor integration).
+   */
+  getDiffSessionSnapshot() {
+    return this.currentSession?.snapshot() ?? null;
+  }
+
   /** Last-persisted content. */
   getLastPersistedContent(): string | ArrayBuffer | null {
     return this.lastPersistedContent;
@@ -278,8 +309,9 @@ export class DocumentModel {
    * (e.g. Lexical's CLEAR_DIFF_TAG_COMMAND flow).
    */
   clearDiffState(): void {
-    if (this.diffState) {
+    if (this.diffState || this.currentSession) {
       this.diffState = null;
+      this.currentSession = null;
       this.emit('diff-state-changed');
     }
   }
@@ -394,7 +426,7 @@ export class DocumentModel {
     if (this.disposed) return;
 
     const lastLen = typeof this.lastPersistedContent === 'string' ? this.lastPersistedContent.length : -1;
-    console.log('[diff-trace] DocumentModel.handleExternalChange enter', {
+    diffTrace('DocumentModel.handleExternalChange enter', {
       path: this.filePath,
       checkPendingTags: info.checkPendingTags,
       contentLen: typeof info.content === 'string' ? info.content.length : -1,
@@ -406,7 +438,7 @@ export class DocumentModel {
     // This catches our own saves echoing back through the file watcher.
     const isEcho = this.lastPersistedContent !== null && info.content === this.lastPersistedContent;
     if (isEcho && !info.checkPendingTags) {
-      console.log('[diff-trace] DocumentModel.handleExternalChange echo-skip', { path: this.filePath, t: performance.now() });
+      diffTrace('DocumentModel.handleExternalChange echo-skip', { path: this.filePath, t: performance.now() });
       return;
     }
 
@@ -418,7 +450,7 @@ export class DocumentModel {
       (tag: { id: string; sessionId: string; createdAt?: string; status?: string }) =>
         (tag as any).status !== 'reviewed' && (tag as any).status !== 'rejected',
     );
-    console.log('[diff-trace] DocumentModel.handleExternalChange tags', {
+    diffTrace('DocumentModel.handleExternalChange tags', {
       path: this.filePath,
       activeTagCount: activeTags.length,
       isEcho,
@@ -431,6 +463,7 @@ export class DocumentModel {
       // Enter diff mode
       const tag = activeTags[0];
       const newContent = info.content;
+      const newContentString = typeof newContent === 'string' ? newContent : '';
 
       // Get the diff baseline -- this is the content BEFORE the AI edit.
       // May come from a history tag (for incremental approvals) or lastPersistedContent.
@@ -442,42 +475,55 @@ export class DocumentModel {
         oldContent = typeof this.lastPersistedContent === 'string' ? this.lastPersistedContent : '';
       }
 
-      this.diffState = {
-        tagId: tag.id,
-        sessionId: tag.sessionId,
-        oldContent,
-        newContent: typeof newContent === 'string' ? newContent : '',
-        createdAt: tag.createdAt ? new Date(tag.createdAt).getTime() : Date.now(),
-      };
+      // Drive the DiffSession state machine. It owns duplicate-suppression and
+      // baseline-rotation logic; only `apply` / `fresh` outcomes notify editors.
+      // `queued` payloads sit in the session and are drained when the editor reports
+      // its current apply has settled via `markDiffApplied()`.
+      let ingestKind: 'apply' | 'queued' | 'duplicate' | 'fresh';
+      if (!this.currentSession || this.currentSession.tagId !== tag.id) {
+        this.currentSession = DiffSession.create({
+          tagId: tag.id,
+          sessionId: tag.sessionId,
+          baselineContent: oldContent,
+          initialContent: newContentString,
+          createdAt: tag.createdAt ? new Date(tag.createdAt).getTime() : Date.now(),
+        });
+        ingestKind = 'fresh';
+      } else {
+        const result = this.currentSession.ingest(newContentString);
+        ingestKind = result.kind;
+        // The session may have re-baselined since creation (partial approval); use its
+        // current baseline rather than what getDiffBaseline returned.
+        if (this.currentSession.baselineContent !== oldContent) {
+          oldContent = this.currentSession.baselineContent;
+        }
+      }
 
-      console.log('[diff-trace] DocumentModel diff-state set', {
+      this.refreshDiffStateFromSession();
+
+      diffTrace('DocumentModel diff-state set', {
         path: this.filePath,
         tagId: tag.id,
-        oldLen: oldContent.length,
-        oldHead: oldContent.slice(0, 80),
-        newLen: typeof newContent === 'string' ? newContent.length : -1,
-        newHead: typeof newContent === 'string' ? newContent.slice(0, 80) : '',
-        sameOldNew: oldContent === newContent,
+        ingestKind,
+        phase: this.currentSession.phase,
+        oldLen: this.currentSession.baselineContent.length,
+        oldHead: this.currentSession.baselineContent.slice(0, 80),
+        newLen: this.currentSession.appliedContent.length,
+        newHead: this.currentSession.appliedContent.slice(0, 80),
+        sameOldNew: this.currentSession.baselineContent === this.currentSession.appliedContent,
         attachCount: this.attachments.size,
         t: performance.now(),
       });
 
-      this.emit('diff-state-changed');
-
-      // Notify all editors about diff mode
-      for (const att of this.attachments.values()) {
-        for (const cb of att.diffRequestedCallbacks) {
-          try {
-            cb(this.diffState);
-          } catch (err) {
-            console.error('[DocumentModel] Error in diff requested callback:', err);
-          }
-        }
+      // Only notify editors when the state machine says new work is needed.
+      // 'queued' payloads wait for the in-flight apply to settle; 'duplicate' is a no-op.
+      if (ingestKind === 'apply' || ingestKind === 'fresh') {
+        this.notifyDiffRequested();
       }
     } else {
       // Normal external change -- update persisted content and notify editors.
       // (Echo suppression already ran above for non-tag-check events.)
-      console.log('[diff-trace] DocumentModel notifyFileChanged (no active tags)', {
+      diffTrace('DocumentModel notifyFileChanged (no active tags)', {
         path: this.filePath,
         contentLen: typeof info.content === 'string' ? info.content.length : -1,
         t: performance.now(),
@@ -487,13 +533,104 @@ export class DocumentModel {
     }
   }
 
+  /**
+   * Rebuild `diffState` from the current session's snapshot. Called after every session
+   * mutation (ingest, drain, partial-resolve) so consumers reading `diffState` see a
+   * value consistent with the state machine.
+   */
+  private refreshDiffStateFromSession(): void {
+    if (!this.currentSession) {
+      this.diffState = null;
+      this.emit('diff-state-changed');
+      return;
+    }
+    const snap = this.currentSession.snapshot();
+    this.diffState = {
+      tagId: snap.tagId,
+      sessionId: snap.sessionId,
+      oldContent: snap.baselineContent,
+      newContent: snap.appliedContent,
+      newContentHash: snap.appliedContentHash,
+      createdAt: snap.createdAt,
+    };
+    this.emit('diff-state-changed');
+  }
+
+  /** Fire onDiffRequested callbacks on every attached editor with the current diffState. */
+  private notifyDiffRequested(): void {
+    if (!this.diffState) return;
+    for (const att of this.attachments.values()) {
+      for (const cb of att.diffRequestedCallbacks) {
+        try {
+          cb(this.diffState);
+        } catch (err) {
+          console.error('[DocumentModel] Error in diff requested callback:', err);
+        }
+      }
+    }
+  }
+
+  /**
+   * Editor reports that its current apply finished. Transition the session from
+   * `applying` to `applied`, then drain any payload queued during the apply -- if a
+   * fresh payload was waiting, the session re-enters `applying` and we re-fire the
+   * diff-requested callbacks with the drained content.
+   */
+  private markDiffApplied(): void {
+    if (!this.currentSession) return;
+    if (this.currentSession.phase !== 'applying') return; // Defensive: no-op if not applying.
+    this.currentSession.markApplied();
+
+    const drained = this.currentSession.drainPending();
+    diffTrace('DocumentModel.markDiffApplied', {
+      path: this.filePath,
+      tagId: this.currentSession.tagId,
+      phaseAfterMark: this.currentSession.phase,
+      drainedLen: drained?.length ?? -1,
+      t: performance.now(),
+    });
+    this.refreshDiffStateFromSession();
+    if (drained !== null) {
+      // Session is back in 'applying' with the drained payload as appliedContent.
+      this.notifyDiffRequested();
+    }
+  }
+
+  /**
+   * Rotate the active tag and re-baseline after a partial accept/reject. The editor has
+   * already created the new incremental-approval tag and persisted the post-partial
+   * content; we update the session so subsequent file-watcher events compute against the
+   * new baseline. The visible diff stays on screen (un-resolved groups remain).
+   */
+  private applyPartialResolve(input: { newTagId: string; newBaseline: string }): void {
+    if (!this.currentSession || this.currentSession.phase !== 'applied') {
+      diffTrace('DocumentModel.applyPartialResolve ignored', {
+        path: this.filePath,
+        hasSession: !!this.currentSession,
+        phase: this.currentSession?.phase,
+      });
+      return;
+    }
+    this.currentSession.beginPartialResolve();
+    this.currentSession.completePartialResolve(input);
+    this.refreshDiffStateFromSession();
+  }
+
   // -- Diff resolution ------------------------------------------------------
 
   private async resolveDiffFromEditor(editorId: string, accepted: boolean): Promise<void> {
     if (!this.diffState) return;
 
-    const { tagId, oldContent, newContent } = this.diffState;
-    const finalContent = accepted ? newContent : oldContent;
+    const { tagId } = this.diffState;
+    // Use the state machine to compute the final content + transition to resolving-all.
+    // Falls back to the flat diffState if a session somehow doesn't exist (defensive).
+    let finalContent: string;
+    if (this.currentSession && this.currentSession.phase === 'applied') {
+      const { finalContent: sessionFinal } = this.currentSession.beginResolveAll(accepted);
+      finalContent = sessionFinal;
+    } else {
+      finalContent = accepted ? this.diffState.newContent : this.diffState.oldContent;
+    }
 
     // Mark the tag as reviewed
     await this.options.updateTagStatus(this.filePath, tagId, 'reviewed');
@@ -502,7 +639,11 @@ export class DocumentModel {
     await this.backingStore.save(finalContent);
     this.lastPersistedContent = finalContent;
 
-    // Clear diff state
+    // End the session and clear diff state.
+    if (this.currentSession?.phase === 'resolving-all') {
+      this.currentSession.completeResolveAll();
+    }
+    this.currentSession = null;
     this.diffState = null;
     this.emit('diff-state-changed');
 

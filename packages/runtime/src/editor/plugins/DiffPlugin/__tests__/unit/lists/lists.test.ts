@@ -32,8 +32,10 @@ describe('List Replacement Changes', () => {
 
     const result = setupMarkdownReplaceTest(originalMarkdown, replacements);
 
-    // Test diff application - word-level diff only shows the changed parts
-    assertReplacementApplied(result, ['Updated second'], ['Second']);
+    // Word-level (LCS) diff: "Second" -> "Updated"+" "+"second" with " item"
+    // common. Lexical coalesces the trailing whitespace of the equal segment
+    // into the preceding added text node, so "second" arrives as "second ".
+    assertReplacementApplied(result, ['Updated', 'second '], ['Second']);
 
     // Test approve/reject functionality
     assertApproveProducesTarget(result);
@@ -51,7 +53,8 @@ describe('List Replacement Changes', () => {
 
     const result = setupMarkdownReplaceTest(originalMarkdown, replacements);
 
-    // Word-level diff only shows the added part
+    // Word-level (LCS) diff only shows the added part (with leading space
+    // bundled into the same insert segment).
     assertReplacementApplied(result, [' with more details'], []);
     assertApproveProducesTarget(result);
     assertRejectProducesOriginal(result);
@@ -147,12 +150,14 @@ describe('List Replacement Changes', () => {
 
     const result = setupMarkdownReplaceTest(originalMarkdown, replacements);
 
-    // Formatting changes create diff nodes when the structure changes
-    // Each affected list item gets removed and added back with formatting
+    // Pure formatting change in a partial-bullet replacement: only the
+    // re-formatted span gets diff markers. "Buy " and " from store" stay
+    // plain because their format didn't change, so the bullet doesn't flash
+    // red+green from edge to edge.
     assertReplacementApplied(
       result,
-      ['Buy ', 'milk', ' from store', 'Buy ', 'bread', ' from bakery'],
-      ['Buy milk from store', 'Buy bread from bakery'],
+      ['milk', 'bread'],
+      ['milk', 'bread'],
     );
 
     // Approve should apply the formatting, reject should preserve original
@@ -212,8 +217,9 @@ describe('List Replacement Changes', () => {
 
     const result = setupMarkdownReplaceTest(originalMarkdown, replacements);
 
-    // Word-level diff only shows changed parts
-    assertReplacementApplied(result, ['Modified second'], ['Second']);
+    // Word-level (LCS) diff: "Second" -> "Modified"+" "+"second" with " step"
+    // common. Lexical coalesces the trailing whitespace into the added node.
+    assertReplacementApplied(result, ['Modified', 'second '], ['Second']);
     assertApproveProducesTarget(result);
     assertRejectProducesOriginal(result);
   });
@@ -248,10 +254,12 @@ describe('List Replacement Changes', () => {
 
     const result = setupMarkdownReplaceTest(originalMarkdown, replacements);
 
-    // Word-level diff only shows changed parts
+    // Word-level (LCS) diff per item: "Unordered" -> "Modified"+" "+"unordered ",
+    // and similarly for "Ordered" (Lexical coalesces trailing whitespace into
+    // the added node).
     assertReplacementApplied(
       result,
-      ['Modified unordered', 'Modified ordered'],
+      ['Modified', 'unordered ', 'Modified', 'ordered '],
       ['Unordered', 'Ordered'],
     );
     assertApproveProducesTarget(result);
@@ -284,8 +292,10 @@ describe('List Replacement Changes', () => {
 
     const result = setupMarkdownReplaceTest(originalMarkdown, replacements);
 
-    // Word-level diff only shows changed parts
-    assertReplacementApplied(result, ['Updated sub'], ['Sub']);
+    // Word-level (LCS) diff: "Sub" -> "Updated"+" "+"sub" with " item content"
+    // common. Lexical coalesces the trailing whitespace of the equal segment
+    // into the preceding added text node, so "sub" arrives as "sub ".
+    assertReplacementApplied(result, ['Updated', 'sub '], ['Sub']);
     assertApproveProducesTarget(result);
     assertRejectProducesOriginal(result);
   });

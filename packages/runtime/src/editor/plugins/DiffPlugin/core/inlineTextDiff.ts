@@ -74,13 +74,70 @@ export function $applyInlineTextDiff(
         return;
       }
 
-      // Pure formatting change - use full replacement approach for proper accept/reject
-      // This ensures reject can revert to original formatting
-      for (const sourceChild of sourceChildren) {
-        $appendChildAsRemoved(containerNode, sourceChild);
+      // Pure formatting change. Walk char-by-char comparing per-character
+      // formats; equal-format runs become plain text nodes (no diff marker)
+      // and differing-format runs emit a removed-node (source format) plus
+      // added-node (target format) covering just that span. This way bolding
+      // one word in a long bullet only flashes that word red+green instead
+      // of the entire line. Accept/reject still round-trip correctly because
+      // the unchanged portions are unaffected and the changed-format span has
+      // matching paired removed+added nodes.
+      const sourceFormatMap: number[] = [];
+      for (const child of sourceChildren) {
+        const fmt = (child as SerializedTextNode).format || 0;
+        for (let k = 0; k < (child as SerializedTextNode).text.length; k++) {
+          sourceFormatMap.push(fmt);
+        }
       }
-      for (const targetChild of targetChildren) {
-        $appendChildAsAdded(containerNode, targetChild);
+      const targetFormatMap: number[] = [];
+      for (const child of targetChildren) {
+        const fmt = (child as SerializedTextNode).format || 0;
+        for (let k = 0; k < (child as SerializedTextNode).text.length; k++) {
+          targetFormatMap.push(fmt);
+        }
+      }
+
+      let pos = 0;
+      const len = sourceText.length;
+      while (pos < len) {
+        const startPos = pos;
+        const sFmtAtStart = sourceFormatMap[pos];
+        const tFmtAtStart = targetFormatMap[pos];
+        if (sFmtAtStart === tFmtAtStart) {
+          // Equal-format run: extend until either format diverges or its value changes.
+          while (
+            pos < len &&
+            sourceFormatMap[pos] === targetFormatMap[pos] &&
+            sourceFormatMap[pos] === sFmtAtStart
+          ) {
+            pos++;
+          }
+          const node = $createTextNode(sourceText.slice(startPos, pos));
+          node.setFormat(sFmtAtStart);
+          containerNode.append(node);
+        } else {
+          // Differs run: extend while both source and target formats stay
+          // constant AND continue to differ. (If either side's format
+          // transitions mid-run, end here so the next iteration emits the
+          // new pair with correct formats.)
+          while (
+            pos < len &&
+            sourceFormatMap[pos] !== targetFormatMap[pos] &&
+            sourceFormatMap[pos] === sFmtAtStart &&
+            targetFormatMap[pos] === tFmtAtStart
+          ) {
+            pos++;
+          }
+          const text = sourceText.slice(startPos, pos);
+          const removed = $createTextNode(text);
+          removed.setFormat(sFmtAtStart);
+          $setDiffState(removed, 'removed');
+          containerNode.append(removed);
+          const added = $createTextNode(text);
+          added.setFormat(tFmtAtStart);
+          $setDiffState(added, 'added');
+          containerNode.append(added);
+        }
       }
       return;
     }

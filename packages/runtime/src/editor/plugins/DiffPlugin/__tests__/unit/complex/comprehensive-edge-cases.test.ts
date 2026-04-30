@@ -348,11 +348,14 @@ Paragraph 2`;
 [^1]: This is the footnote.`;
 
       // Note: Lexical doesn't have native footnote support, so footnote syntax
-      // like [^1] is treated as literal text and square brackets are escaped
-      // when exported to markdown to prevent them from being interpreted as links
-      const expectedOutput = `This is text with a reference.\\[^1\\].
+      // like [^1] is treated as literal text. The new word-level (LCS) diff
+      // produces a clean replacement -- the original period is moved to after
+      // the [^1] cleanly. Earlier (prefix/suffix) diff used to leave an
+      // orphan period before the bracket because it couldn't find common
+      // middle content; that historical artifact has been removed.
+      const expectedOutput = `This is text with a reference[^1].
 
-\\[^1\\]: This is the footnote.`;
+[^1]: This is the footnote.`;
 
       const result = setupMarkdownDiffTest(original, target);
       expectEditorMarkdownToMatch(result.diffEditor, expectedOutput);

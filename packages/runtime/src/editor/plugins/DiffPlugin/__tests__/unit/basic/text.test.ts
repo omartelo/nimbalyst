@@ -93,16 +93,15 @@ describe('Text Changes', () => {
 
     const result = setupMarkdownDiffTest(originalMarkdown, targetMarkdown);
 
-    // The system now correctly detects formatting changes!
-    // It shows the old unformatted text as removed and the new formatted structure as added
-    // This ensures proper approve/reject functionality
-
-    // Remove: the original single text node
-    // Add: the new three text nodes (with proper formatting preserved)
+    // Pure formatting change. The format-aware pure-formatting path emits
+    // diff markers ONLY for the span whose format actually changed -- here,
+    // the word "simple". The surrounding "This is a " and " paragraph."
+    // stay plain because their format didn't move, so the user only sees
+    // the bolded span flash red+green instead of the entire line.
     assertDiffApplied(
       result,
-      ['This is a ', '**simple**', ' paragraph.'], // The three new text nodes (with markdown formatting)
-      ['This is a simple paragraph.'], // The original single text node
+      ['**simple**'], // added: bolded "simple"
+      ['simple'],     // removed: original unformatted "simple"
     );
 
     // Test approve/reject functionality

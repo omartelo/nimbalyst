@@ -17,7 +17,7 @@ export function SearchReplacePlugin() {
     // Register the search/replace bar provider
     registry.register({
       id: 'search-replace-bar',
-      priority: 90, // Slightly lower than DiffApprovalBar (100), so diff bar renders first
+      priority: 90, // Lower than the diff approval header (priority 100) so the diff bar renders first
       shouldRender: (context: TabContext) => {
         // Always render if there's an editor - the component will handle visibility internally
         return !!(context.editor && context.filePath);

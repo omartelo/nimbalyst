@@ -36,7 +36,8 @@ export type { EditorInstance } from './ai/EditorRegistry';
 // Plugins
 export { DocumentLinkPlugin } from './plugins/DocumentLinkPlugin';
 export { DocumentReferenceNode, DocumentReferenceTransformer, LegacyDocumentReferenceTransformer, $createDocumentReferenceNode, $isDocumentReferenceNode } from './plugins/DocumentLinkPlugin/DocumentLinkNode';
-export { DiffApprovalBarPlugin, DiffApprovalBar } from './plugins/DiffApprovalBar';
+// `DiffApprovalBarPlugin` / `DiffApprovalBar` were dropped -- the live diff approval UI is
+// `UnifiedDiffHeader` in the electron renderer, fed by `useLexicalDiffState`.
 export { useLexicalDiffState } from './plugins/DiffApprovalBar/useLexicalDiffState';
 export type { LexicalDiffState } from './plugins/DiffApprovalBar/useLexicalDiffState';
 export { SearchReplacePlugin, SearchReplaceBar, SearchReplaceStateManager } from './plugins/SearchReplace';

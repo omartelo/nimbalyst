@@ -385,6 +385,76 @@ describe('DocumentModel', () => {
       expect(diffModel.getDiffState()).toBeNull();
     });
 
+    it('does not fire onDiffRequested for a duplicate payload after markDiffApplied', async () => {
+      const handle = diffModel.attach();
+      const diffCb = vi.fn();
+      handle.onDiffRequested(diffCb);
+
+      diffStore.triggerExternalChange('ai edit');
+      await vi.waitFor(() => expect(diffCb).toHaveBeenCalledTimes(1));
+
+      // Editor reports its apply finished.
+      handle.markDiffApplied();
+
+      // Same disk content arrives again (e.g. the second of the dual-IPC events). Should be
+      // recognized as duplicate by the session and NOT trigger another applyDiffState.
+      diffStore.triggerExternalChange('ai edit');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(diffCb).toHaveBeenCalledTimes(1);
+    });
+
+    it('queues a payload that arrives during apply and drains via markDiffApplied', async () => {
+      const handle = diffModel.attach();
+      const diffCb = vi.fn();
+      handle.onDiffRequested(diffCb);
+
+      // First edit -- enters 'applying'.
+      diffStore.triggerExternalChange('first ai edit');
+      await vi.waitFor(() => expect(diffCb).toHaveBeenCalledTimes(1));
+      expect(diffCb.mock.calls[0][0].newContent).toBe('first ai edit');
+
+      // Second edit lands BEFORE the editor reports apply done. DocumentModel should queue
+      // it inside the session rather than firing onDiffRequested again.
+      diffStore.triggerExternalChange('second ai edit');
+      await vi.advanceTimersByTimeAsync(50);
+      expect(diffCb).toHaveBeenCalledTimes(1);
+      // The session has the queued payload visible via the snapshot.
+      expect(diffModel.getDiffSessionSnapshot()?.pendingContent).toBe('second ai edit');
+
+      // Editor finishes the first apply and tells the model.
+      handle.markDiffApplied();
+      // Drain should fire onDiffRequested with the second payload.
+      expect(diffCb).toHaveBeenCalledTimes(2);
+      expect(diffCb.mock.calls[1][0].newContent).toBe('second ai edit');
+      expect(diffModel.getDiffSessionSnapshot()?.pendingContent).toBeNull();
+      expect(diffModel.getDiffSessionSnapshot()?.phase).toBe('applying');
+    });
+
+    it('completePartialResolve rotates tag and re-baselines the session', async () => {
+      const handle = diffModel.attach();
+      const diffCb = vi.fn();
+      handle.onDiffRequested(diffCb);
+
+      diffStore.triggerExternalChange('ai edit');
+      await vi.waitFor(() => expect(diffCb).toHaveBeenCalledTimes(1));
+      handle.markDiffApplied();
+
+      handle.completePartialResolve({
+        newTagId: 'tag-2',
+        newBaseline: 'partial-accepted-baseline',
+      });
+
+      const snap = diffModel.getDiffSessionSnapshot();
+      expect(snap?.tagId).toBe('tag-2');
+      expect(snap?.baselineContent).toBe('partial-accepted-baseline');
+      // appliedContent unchanged -- the un-resolved groups stay on screen.
+      expect(snap?.appliedContent).toBe('ai edit');
+      expect(snap?.phase).toBe('applied');
+      // diffState mirrors the rotation.
+      expect(diffModel.getDiffState()?.tagId).toBe('tag-2');
+      expect(diffModel.getDiffState()?.oldContent).toBe('partial-accepted-baseline');
+    });
+
     it('emits diff-state-changed event on enter and exit', async () => {
       const listener = vi.fn();
       diffModel.on('diff-state-changed', listener);

@@ -111,7 +111,6 @@ import { TerminalBottomPanel } from './components/TerminalBottomPanel';
 import { registerDocumentLinkPlugin } from './plugins/registerDocumentLinkPlugin';
 import { registerAIChatPlugin } from './plugins/registerAIChatPlugin';
 import { registerTrackerPlugin } from './plugins/registerTrackerPlugin';
-import { registerDiffApprovalBarPlugin } from './plugins/registerDiffApprovalBarPlugin';
 import { registerSearchReplacePlugin } from './plugins/registerSearchReplacePlugin';
 import { registerMockupPlugin } from './plugins/registerMockupPlugin';
 import { registerExtensionSystem, setExtensionWorkspacePath } from './plugins/registerExtensionSystem';
@@ -206,8 +205,6 @@ if (!pluginsRegistered) {
   registerDocumentLinkPlugin();
   registerTrackerPlugin(null); // Load built-in trackers now, custom trackers loaded in AppLayout
   registerAIChatPlugin();
-  // Note: DiffApprovalBarPlugin disabled - now using UnifiedDiffHeader in TabEditor directly
-  // registerDiffApprovalBarPlugin();
   registerSearchReplacePlugin(); // Search/replace bar in fixed tab header
   registerMockupPlugin(); // Mockup embedding support
   pluginsRegistered = true;

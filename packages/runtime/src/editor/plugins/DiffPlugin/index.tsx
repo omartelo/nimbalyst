@@ -30,6 +30,7 @@ import { $getState, $setState } from 'lexical';
 
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
 import { $convertToEnhancedMarkdownString, getEditorTransformers } from '../../markdown';
+import { diffTrace } from '../../../utils/debugFlags';
 import { $isTableNode, $isTableRowNode, $isTableCellNode } from '@lexical/table';
 import {
   $createTextNode,
@@ -226,7 +227,7 @@ export function DiffPlugin(): JSX.Element | null {
           try {
             const firstNew = normalizedReplacements[0]?.newText ?? '';
             const firstOld = normalizedReplacements[0]?.oldText ?? '';
-            console.log('[diff-trace] DiffPlugin APPLY_MARKDOWN_REPLACE_COMMAND', {
+            diffTrace('DiffPlugin APPLY_MARKDOWN_REPLACE_COMMAND', {
               originalLen: originalMarkdown.length,
               originalHead: originalMarkdown.slice(0, 80),
               firstOldLen: firstOld.length,

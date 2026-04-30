@@ -172,8 +172,8 @@ export const CollaborativeTabEditor: React.FC<CollaborativeTabEditorProps> = ({
   const cursorColor = useMemo(() => randomCursorColor(), []);
   const assetService = useMemo(() => new CollabAssetService(activeConfig), [activeConfig]);
   const keyRotationEpoch = useAtomValue(collabKeyRotationEpochAtom);
-  // Captured Lexical editor instance — needed to render the DiffApprovalBar
-  // (and any other FixedTabHeader plugin) when the agent applies edits.
+  // Captured Lexical editor instance -- needed by FixedTabHeader plugins
+  // (search/replace, the unified diff header, etc.) when the agent applies edits.
   const [lexicalEditor, setLexicalEditor] = useState<any | null>(null);
 
   // Re-key: when the rotation epoch changes, re-fetch config with new encryption key
@@ -428,8 +428,7 @@ export const CollaborativeTabEditor: React.FC<CollaborativeTabEditorProps> = ({
         {providerReadyRef.current ? (
           <DocumentPathProvider documentPath={filePath}>
             {/* Accept/reject bar when an AI edit is pending review. Mirrors
-                the TabEditor markdown branch; the global DiffApprovalBarPlugin
-                is intentionally disabled in App.tsx. */}
+                the TabEditor markdown branch. */}
             <LexicalDiffHeaderAdapter
               editor={lexicalEditor ?? undefined}
               filePath={filePath}

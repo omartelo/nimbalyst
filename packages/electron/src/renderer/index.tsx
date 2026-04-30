@@ -39,6 +39,8 @@ import {
   initDeveloperFeatureSettings,
   externalEditorSettingsAtom,
   initExternalEditorSettings,
+  debugFlagsAtom,
+  initDebugFlags,
 } from './store/atoms/appSettings';
 import {
   claudeUsageIndicatorEnabledAtom,
@@ -155,6 +157,9 @@ await Promise.allSettled([
   }),
   initTrackerAutomationSettings().then((settings) => {
     store.set(trackerAutomationAtom, settings);
+  }),
+  initDebugFlags().then((flags) => {
+    store.set(debugFlagsAtom, flags);
   }),
 ]);
 

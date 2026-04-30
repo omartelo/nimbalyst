@@ -157,6 +157,10 @@
     "./store": {
       "import": "./dist/store/index.js",
       "types": "./dist/store/index.d.ts"
+    },
+    "./utils/debugFlags": {
+      "import": "./dist/utils/debugFlags.js",
+      "types": "./dist/utils/debugFlags.d.ts"
     }
   },
   "files": [

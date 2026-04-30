@@ -28,12 +28,13 @@ describe('Converting characters', () => {
 
     const result = setupMarkdownReplaceTest(originalMarkdown, replacements);
 
-    // This should replace ALL instances of 'p' including in middle of words
-    // Expected: "The aPP is PePPered with Problems"
+    // The word-level diff (LCS-based) marks only the changed words, leaving
+    // the unchanged "The is with" untouched. Each case-changed word becomes
+    // its own add/remove pair instead of one whole-line replacement.
     assertReplacementApplied(
       result,
-      ['The aPP is PePPered with Problems'],
-      ['The app is peppered with problems'],
+      ['aPP', 'PePPered', 'Problems'],
+      ['app', 'peppered', 'problems'],
     );
 
     // Test approve/reject functionality
@@ -48,12 +49,13 @@ describe('Converting characters', () => {
 
     const result = setupMarkdownReplaceTest(originalMarkdown, replacements);
 
-    // This should replace ALL instances of 'b' including in middle of words
-    // Expected: "BoB Bought a Big Bottle of Beer"
+    // Word-level (LCS) diff: each case-changed word becomes its own
+    // insert/delete pair; "a", "of" and the surrounding spaces stay
+    // unchanged.
     assertReplacementApplied(
       result,
-      ['BoB Bought a Big Bottle of Beer'],
-      ['Bob bought a big bottle of beer'],
+      ['BoB', 'Bought', 'Big', 'Bottle', 'Beer'],
+      ['Bob', 'bought', 'big', 'bottle', 'beer'],
     );
 
     // Test approve/reject functionality
@@ -70,13 +72,12 @@ describe('Converting characters', () => {
 
     const result = setupMarkdownReplaceTest(originalMarkdown, replacements);
 
-    // This should replace ALL instances of 'strong' even when part of other words
-    // The diff algorithm correctly identifies only the changed portions
-    // "He has " stays unchanged, only "strong muscles and stronghold" changes to "STRONG muscles and STRONGhold", " defenses" stays unchanged
+    // Word-level diff marks only the two case-changed tokens.
+    // "He has", "muscles and", and "defenses" stay unchanged.
     assertReplacementApplied(
       result,
-      ['STRONG muscles and STRONGhold'],
-      ['strong muscles and stronghold'],
+      ['STRONG', 'STRONGhold'],
+      ['strong', 'stronghold'],
     );
 
     // Test approve/reject functionality

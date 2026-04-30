@@ -1,6 +1,7 @@
 import {
   $getRoot,
   $isElementNode,
+  $isTextNode,
   type LexicalEditor,
   type LexicalNode,
 } from 'lexical';
@@ -94,6 +95,30 @@ export function groupDiffChanges(editor: LexicalEditor): DiffChangeGroup[] {
       return text.trim().length === 0;
     };
 
+    // Helper: are node1 and node2 siblings whose only intermediate sibling is a
+    // single equal-state text node containing whitespace? This is the cosmetic
+    // bridge that lets a phrase like "first paragraph" -> "FIRST PARAGRAPH"
+    // (which the LCS diff splits into two remove+add pairs around the equal
+    // " ") collapse into one change group. We require pure whitespace and
+    // length <= 1 so longer equal middles (e.g., the unchanged interior of a
+    // bullet whose bold prefix and trailing text both change) stay granular.
+    const areNodesBridgedByShortWhitespace = (
+      node1: LexicalNode,
+      node2: LexicalNode,
+    ): boolean => {
+      const parent = node1.getParent();
+      if (!parent || parent.getKey() !== node2.getParent()?.getKey()) {
+        return false;
+      }
+      const between = node1.getNextSibling();
+      if (!between || between.getKey() === node2.getKey()) return false;
+      if (between.getNextSibling()?.getKey() !== node2.getKey()) return false;
+      if (!$isTextNode(between)) return false;
+      if ($getDiffState(between)) return false;
+      const text = between.getTextContent();
+      return text.length === 1 && /\s/.test(text);
+    };
+
     // Helper to check if two nodes are adjacent in the document
     // Uses sibling relationships to determine visual proximity
     const areNodesAdjacent = (node1: LexicalNode, node2: LexicalNode): boolean => {
@@ -164,6 +189,37 @@ export function groupDiffChanges(editor: LexicalEditor): DiffChangeGroup[] {
             nodes.push(allDiffNodes[i].node);
             types.add(allDiffNodes[i].state);
             i++;
+          }
+
+          // Extend across consecutive remove+add pairs that the LCS diff split
+          // around a single equal whitespace token (e.g. word-by-word changes
+          // within one phrase). Only short whitespace bridges are collapsed --
+          // longer equal segments preserve their own groups so a bullet with
+          // independent prefix and suffix changes stays clickable separately.
+          while (
+            i + 1 < allDiffNodes.length &&
+            allDiffNodes[i].state === 'removed' &&
+            allDiffNodes[i + 1].state === 'added' &&
+            areNodesBridgedByShortWhitespace(
+              nodes[nodes.length - 1],
+              allDiffNodes[i].node,
+            )
+          ) {
+            nodes.push(allDiffNodes[i].node);
+            types.add(allDiffNodes[i].state);
+            i++;
+            nodes.push(allDiffNodes[i].node);
+            types.add(allDiffNodes[i].state);
+            i++;
+            while (
+              i < allDiffNodes.length &&
+              allDiffNodes[i].state === 'added' &&
+              areNodesAdjacent(nodes[nodes.length - 1], allDiffNodes[i].node)
+            ) {
+              nodes.push(allDiffNodes[i].node);
+              types.add(allDiffNodes[i].state);
+              i++;
+            }
           }
         } else {
           // Not a replacement - fall through to group with other same-state nodes

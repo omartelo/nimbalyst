@@ -4,45 +4,33 @@
 
 This document tracks the status of DiffPlugin reliability testing and telemetry infrastructure added as part of the diff-plugin-reliability.md plan.
 
-## Test Status (as of latest run)
+## Test Status (as of 2026-04-29 triage)
 
 ### Unit Tests
-- **Total Tests**: 476
-- **Passing**: 392 (82%)
-- **Failing**: 82 (18%)
-- **Test Files Passing**: 15/29
+- **Total Tests**: 471
+- **Passing**: 463 (98.3%)
+- **Skipped**: 8 (1.7%)
+- **Failing**: 0
+- **Test Files**: 52 passed, 1 skipped (53 total) -- run from repo root with `npx vitest run packages/runtime/src/editor/plugins/DiffPlugin/__tests__`
 
-### Main Failure Categories
+The previously documented 82 failures (table operations, list formatting, complex formatting, horizontal rules) are no longer reproducible -- they have been fixed by intervening work and the suite is green when run with the root `vitest.config.ts` (which sets `globals: true`). Running vitest from inside the runtime package without the root config produced spurious "describe is not defined" errors -- always run from the repo root.
 
-1. **Table Operations** (table-row-add.test.ts, table-column-add.test.ts)
-   - Row/column additions not being detected properly
-   - Cells not being marked as added/removed correctly
-   - **Impact**: Medium - affects table editing features
+### Currently Skipped Tests (long-tail bugs, tracked separately)
 
-2. **List Formatting** (lists.test.ts, comprehensive-coverage.test.ts)
-   - Nested list indentation issues
-   - Whitespace handling in list markers
-   - List item matching failures
-   - **Impact**: High - lists are frequently used
+1. **Link target updates** -- `__tests__/unit/basic/links.test.ts:128`, `:186`
+   - "Updates link URL in paragraph" / "Updates link in heading"
+   - URL change with unchanged visible text produces no diff
+   - Tracked as bug NIM-398
 
-3. **Complex Formatting** (additional-coverage.test.ts, comprehensive-edge-cases.test.ts)
-   - Overlapping bold/italic/strikethrough
-   - Nested formatting boundaries
-   - **Impact**: Low - edge cases
+2. **Code block language change** -- `__tests__/unit/basic/code.test.ts:232`
+   - "Code block with language change but same content should be replaced"
+   - Tracked as bug NIM-398 (same root cause as links: attribute-only changes ignored)
 
-4. **Horizontal Rules** (comprehensive-edge-cases.test.ts)
-   - Element node key lookup failures
-   - **Impact**: Low - uncommon use case
+3. **NBSP normalization** -- `__tests__/unit/basic/nbsp-matching.test.ts` (whole suite `describe.skip`)
+   - Replacement text-matching does not normalize U+00A0 vs regular space
+   - Tracked as bug NIM-399
 
-5. **Test Infrastructure** (test-errors.test.ts)
-   - Error handling test needs adjustment
-   - **Impact**: None - test infrastructure only
-
-### Recent Improvements
-
-- Fixed TreeMatcher.test.ts import error
-- All 15 TreeMatcher tests now passing
-- Improved from 377 to 392 passing tests (+15)
+None of the skipped tests block the current Lexical Diff System Investigation and Rethink plan; they are deliberately deferred long-tail items.
 
 ## New Test Infrastructure
 
