@@ -82,6 +82,12 @@ export class OptimizedWorkspaceWatcher {
                     window.webContents.send('file-deleted', { filePath });
                 }
             },
+            // The file-tree builder shows gitignored paths that aren't in
+            // EXCLUDED_DIRS (e.g. `temp/`, `nimbalyst-local/`, `test-results/`),
+            // so we need refresh events for gitignored adds/unlinks too. Without
+            // this, an agent's `mkdir tmp` against a `tmp/` gitignore pattern
+            // never reaches the sidebar until the workspace reopens.
+            receiveGitignoredStructureEvents: true,
         });
     }
 

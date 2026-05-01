@@ -369,6 +369,69 @@ describe('WorkspaceEventBus gitignore bypass', () => {
     });
   });
 
+  describe('gitignored structure events for tree refresh', () => {
+    it('dispatches gitignored add events to opt-in listeners with bypassed=true', async () => {
+      const treeListener = createListener();
+      treeListener.receiveGitignoredStructureEvents = true;
+      const aiListener = createListener();
+      await subscribe(WORKSPACE, 'tree-sub', treeListener);
+      await subscribe(WORKSPACE, 'ai-sub', aiListener);
+
+      // dist/ is gitignored and not in the bypass set. The agent just ran
+      // `mkdir dist` (or similar) and the file-tree sidebar needs to know.
+      mockFsAccess.mockResolvedValue(undefined);
+      fireWatchEvent('rename', 'dist');
+
+      await vi.waitFor(() => {
+        expect(treeListener.onAdd).toHaveBeenCalledWith(
+          `${WORKSPACE}/dist`,
+          true,
+        );
+      });
+      // AI/editor listener still drops gitignored adds it isn't tracking.
+      expect(aiListener.onAdd).not.toHaveBeenCalled();
+
+      unsubscribe(WORKSPACE, 'tree-sub');
+      unsubscribe(WORKSPACE, 'ai-sub');
+    });
+
+    it('dispatches gitignored unlink events to opt-in listeners with bypassed=true', async () => {
+      const treeListener = createListener();
+      treeListener.receiveGitignoredStructureEvents = true;
+      const aiListener = createListener();
+      await subscribe(WORKSPACE, 'tree-sub', treeListener);
+      await subscribe(WORKSPACE, 'ai-sub', aiListener);
+
+      // The path no longer exists on disk -> unlink.
+      mockFsAccess.mockRejectedValue(new Error('ENOENT'));
+      fireWatchEvent('rename', 'build');
+
+      await vi.waitFor(() => {
+        expect(treeListener.onUnlink).toHaveBeenCalledWith(
+          `${WORKSPACE}/build`,
+          true,
+        );
+      });
+      expect(aiListener.onUnlink).not.toHaveBeenCalled();
+
+      unsubscribe(WORKSPACE, 'tree-sub');
+      unsubscribe(WORKSPACE, 'ai-sub');
+    });
+
+    it('still drops gitignored change events for opt-in listeners', async () => {
+      const treeListener = createListener();
+      treeListener.receiveGitignoredStructureEvents = true;
+      await subscribe(WORKSPACE, 'tree-sub', treeListener);
+
+      // Content edits to gitignored files don't shape the tree, so still drop.
+      fireWatchEvent('change', 'dist/bundle.js');
+
+      expect(treeListener.onChange).not.toHaveBeenCalled();
+
+      unsubscribe(WORKSPACE, 'tree-sub');
+    });
+  });
+
   describe('hardcoded ignores are never bypassed', () => {
     it('always filters .git paths regardless of bypass', async () => {
       const listener = createListener();

@@ -186,6 +186,19 @@ export interface WorkspaceEventListener {
   onChange: (filePath: string, gitignoreBypassed?: boolean) => void;
   onAdd: (filePath: string, gitignoreBypassed?: boolean) => void;
   onUnlink: (filePath: string, gitignoreBypassed?: boolean) => void;
+  /**
+   * Opt in to receive `add` and `unlink` events for gitignored paths
+   * (dispatched with `gitignoreBypassed=true`). `change` events for
+   * gitignored paths are still dropped — only structural events come through.
+   *
+   * Used by the file-tree watcher: the tree builder filters by a hardcoded
+   * EXCLUDED_DIRS set, not by .gitignore, so gitignored folders like `temp/`
+   * or `test-results/` DO show up in the sidebar and need refresh events
+   * when they appear or disappear. Listeners that perform AI change tracking
+   * or editor notifications should leave this off so they don't pick up
+   * unrelated gitignored writes.
+   */
+  receiveGitignoredStructureEvents?: boolean;
 }
 
 /** Dropped gitignored event stored in replay buffer. */
@@ -701,6 +714,7 @@ function startRecursiveWatch(
 
       // Stage 2: gitignore check with bypass support
       let bypassed = false;
+      let dropForNonStructureListeners = false;
       if (isGitignored(relativePath, ig)) {
         const action = getGitignoreAction(absolutePath, entry);
         if (action === 'drop') {
@@ -708,9 +722,18 @@ function startRecursiveWatch(
           // Preserve the raw fs.watch event type so replay can determine add vs unlink.
           const bufferEventType = eventType === 'change' ? 'change' : 'rename';
           addToReplayBuffer(entry, absolutePath, bufferEventType);
-          return;
+          // For 'change' events on gitignored files we stop here — only
+          // listeners that explicitly bypass should see content edits.
+          if (eventType === 'change') return;
+          // For 'rename' (add/unlink) we still dispatch to listeners that
+          // opted into gitignored structure events (file-tree watcher), so
+          // gitignored folders like `temp/` or `test-results/` still trigger
+          // a sidebar refresh when they appear or disappear.
+          dropForNonStructureListeners = true;
+          bypassed = true;
+        } else {
+          bypassed = true;
         }
-        bypassed = true;
       }
 
       if (eventType === 'change') {
@@ -719,10 +742,10 @@ function startRecursiveWatch(
         // 'rename' — could be add or delete. Retry existence checks because
         // atomic writers may create the final path slightly after the event.
         void pathExistsAfterRename(absolutePath).then((exists) => {
-          if (exists) {
-            for (const l of entry.listeners.values()) l.onAdd(absolutePath, bypassed || undefined);
-          } else {
-            for (const l of entry.listeners.values()) l.onUnlink(absolutePath, bypassed || undefined);
+          for (const l of entry.listeners.values()) {
+            if (dropForNonStructureListeners && !l.receiveGitignoredStructureEvents) continue;
+            if (exists) l.onAdd(absolutePath, bypassed || undefined);
+            else l.onUnlink(absolutePath, bypassed || undefined);
           }
         });
       }
