@@ -10,11 +10,20 @@ import type {
   ThemeManifest,
   ThemeValidationResult,
 } from '@nimbalyst/extension-sdk';
-import { shell } from 'electron';
-import { safeHandle } from '../utils/ipcRegistry';
+import { BrowserWindow, shell } from 'electron';
+import { safeHandle, safeOn } from '../utils/ipcRegistry';
 import path from 'path';
 import fs from 'fs/promises';
 import { app } from 'electron';
+import {
+  getTheme,
+  setTheme,
+  getThemeIsDark,
+  getPendingThemeFallback,
+  setPendingThemeFallback,
+  clearPendingThemeFallback,
+} from '../utils/store';
+import { updateNativeTheme, updateWindowTitleBars } from '../theme/ThemeManager';
 
 /**
  * Platform service implementation for Electron.
@@ -67,6 +76,26 @@ class ElectronThemePlatformService {
 // Initialize theme loader
 const platformService = new ElectronThemePlatformService();
 const themeLoader = new ThemeLoader(platformService);
+
+/**
+ * Renderer-driven cache of themes contributed by enabled extensions.
+ * Pushed via the `theme:extension-themes-changed` IPC channel from the
+ * ExtensionThemeBridge. The renderer is the source of truth -- this is just
+ * a mirror for `theme:list` merging and `reconcileActiveTheme`.
+ */
+interface CachedExtensionTheme {
+  id: string;
+  name: string;
+  isDark: boolean;
+  contributedBy: string;
+}
+let extensionThemesCache: CachedExtensionTheme[] = [];
+
+/** True once the extension load pass has completed at least once in the renderer. */
+let extensionsHydrated = false;
+
+// Track the user themes dir once it's resolved -- used to decide origin.
+let cachedUserThemesDir: string | null = null;
 
 // Track if handlers are registered
 let handlersRegistered = false;
@@ -123,6 +152,98 @@ function getBuiltInThemesDir(): string {
   return themesDir;
 }
 
+/**
+ * Build the merged list of theme manifests for `theme:list` -- filesystem
+ * themes (with `origin` set) plus extension-contributed themes (synthesized
+ * manifest entries with `origin: 'extension'` and `contributedBy`).
+ */
+function buildMergedThemeList(): ThemeManifest[] {
+  const filesystem = themeLoader.getDiscoveredThemes().map(d => {
+    const isUser = cachedUserThemesDir ? d.path.startsWith(cachedUserThemesDir) : false;
+    return {
+      ...d.manifest,
+      origin: isUser ? 'user' : 'builtin',
+    } as ThemeManifest;
+  });
+
+  const extension: ThemeManifest[] = extensionThemesCache.map(t => ({
+    id: t.id,
+    name: t.name,
+    isDark: t.isDark,
+    version: '0.0.0',
+    colors: {},
+    origin: 'extension' as const,
+    contributedBy: t.contributedBy,
+  }));
+
+  return [...filesystem, ...extension];
+}
+
+/**
+ * Whether a theme ID exists either as a filesystem theme or as an extension
+ * theme currently registered.
+ */
+function themeExists(themeId: string): boolean {
+  if (themeId === 'light' || themeId === 'dark' || themeId === 'system' || themeId === 'auto') {
+    return true;
+  }
+  if (themeLoader.getDiscoveredThemes().some(d => d.manifest.id === themeId)) {
+    return true;
+  }
+  if (extensionThemesCache.some(t => t.id === themeId)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * If the persisted active theme is no longer available (extension uninstalled
+ * or disabled, theme file removed), apply a sensible fallback (`dark` or
+ * `light` depending on the missing theme's previously-known dark mode).
+ *
+ * Only runs after the extension load pass completes -- otherwise the
+ * still-loading extension theme would be considered "missing" and trigger an
+ * unnecessary fallback that gets immediately overwritten.
+ */
+function reconcileActiveTheme(): void {
+  if (!extensionsHydrated) {
+    return;
+  }
+
+  const activeId = getTheme();
+  if (!activeId) return;
+  if (themeExists(activeId)) {
+    return;
+  }
+
+  const wasDark = getThemeIsDark() ?? activeId.includes('dark');
+  const fallbackId = wasDark ? 'dark' : 'light';
+
+  console.info(
+    `[ThemeHandlers] Active theme '${activeId}' is no longer available, falling back to '${fallbackId}'`
+  );
+
+  setTheme(fallbackId, wasDark);
+  setPendingThemeFallback({ missingId: activeId, appliedId: fallbackId });
+
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    win.webContents.send('theme-change', fallbackId);
+    win.webContents.send('theme:fallback-applied', { missingId: activeId, appliedId: fallbackId });
+  }
+
+  updateNativeTheme();
+  updateWindowTitleBars();
+}
+
+/** Broadcast that the theme list changed so panels can refresh. */
+function broadcastThemeListChanged(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    win.webContents.send('theme:list-changed');
+  }
+}
+
 export async function registerThemeHandlers() {
   if (handlersRegistered) {
     console.log('[ThemeHandlers] Handlers already registered, skipping');
@@ -131,6 +252,7 @@ export async function registerThemeHandlers() {
 
   // Discover themes on startup
   const userThemesDir = await getUserThemesDir();
+  cachedUserThemesDir = userThemesDir;
   const builtInThemesDir = getBuiltInThemesDir();
 
   console.log('[ThemeHandlers] User themes directory:', userThemesDir);
@@ -156,10 +278,39 @@ export async function registerThemeHandlers() {
     }
   }
 
-  // List all discovered themes
+  // List all themes -- filesystem themes (with `origin` populated) plus
+  // extension-contributed themes pushed from the renderer.
   safeHandle('theme:list', async () => {
-    const discovered = themeLoader.getDiscoveredThemes();
-    return discovered.map(d => d.manifest);
+    return buildMergedThemeList();
+  });
+
+  // Receive extension theme list updates from the renderer's theme bridge.
+  // Cached for `theme:list` and used to drive `reconcileActiveTheme`.
+  safeOn('theme:extension-themes-changed', (_event, themes: CachedExtensionTheme[]) => {
+    if (!Array.isArray(themes)) {
+      console.warn('[ThemeHandlers] Ignoring invalid extension-themes-changed payload');
+      return;
+    }
+    extensionThemesCache = themes
+      .filter(t => t && typeof t.id === 'string' && typeof t.contributedBy === 'string')
+      .map(t => ({
+        id: t.id,
+        name: typeof t.name === 'string' ? t.name : t.id,
+        isDark: t.isDark === true,
+        contributedBy: t.contributedBy,
+      }));
+    extensionsHydrated = true;
+    broadcastThemeListChanged();
+    reconcileActiveTheme();
+  });
+
+  // Pending fallback notice — read by the Themes panel banner.
+  safeHandle('theme:get-pending-fallback', async () => {
+    return getPendingThemeFallback() ?? null;
+  });
+
+  safeOn('theme:dismiss-pending-fallback', () => {
+    clearPendingThemeFallback();
   });
 
   // Get a specific theme by ID

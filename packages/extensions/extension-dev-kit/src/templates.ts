@@ -149,7 +149,7 @@ The manifest declares what the extension contributes to Nimbalyst. Key fields:
 - **\`contributions.fileIcons\`** -- Custom icons for file types
 - **\`contributions.panels\`** -- Sidebar or bottom panels
 - **\`contributions.commands\`** -- Commands with optional keybindings
-- **\`contributions.themes\`** -- Color themes
+- **\`contributions.themes\`** -- Color themes (see [EXTENSION_THEMING.md](../../docs/EXTENSION_THEMING.md); manifest-only theme extensions are supported)
 - **\`contributions.claudePlugin\`** -- Claude Code agent skills and slash commands (see below)
 - **\`permissions\`** -- Request \`filesystem\`, \`ai\`, or \`network\` access`);
 

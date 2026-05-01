@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useAtomValue, useSetAtom } from 'jotai';
 import type { ConfigTheme } from '@nimbalyst/runtime';
 import { themeIdAtom, setThemeAtom, store, type ThemeId } from '@nimbalyst/runtime/store';
-import { getBaseThemeColors, type ExtendedThemeColors } from '@nimbalyst/runtime';
+import { getBaseThemeColors, getTheme as getRuntimeTheme, type ExtendedThemeColors } from '@nimbalyst/runtime';
 
 /**
  * Map of ExtendedThemeColors keys to CSS variable names.
@@ -266,6 +266,30 @@ export async function applyThemeToDOM(theme: ThemeId): Promise<void> {
       }
     }
   } else {
+    // Extension-contributed themes are kept in the in-memory runtime registry,
+    // not on disk -- consult the registry before going through the filesystem
+    // theme:get IPC.
+    const registryTheme = getRuntimeTheme(resolvedTheme);
+    if (registryTheme && registryTheme.contributedBy) {
+      const isDark = registryTheme.isDark;
+      const baseClass = isDark ? 'dark-theme' : 'light-theme';
+      root.classList.remove('dark-theme', 'light-theme');
+      root.classList.add(baseClass);
+      root.setAttribute('data-theme', resolvedTheme);
+
+      const baseColors = getBaseThemeColors(isDark);
+      const mergedColors = { ...baseColors, ...registryTheme.colors };
+      for (const [key, cssVar] of Object.entries(CSS_VAR_MAP)) {
+        const colorKey = key as keyof ExtendedThemeColors;
+        const value = mergedColors[colorKey];
+        if (value) {
+          root.style.setProperty(cssVar, value);
+        }
+      }
+      console.info(`[useTheme] Applied extension theme: ${registryTheme.name} (${resolvedTheme})`);
+      return;
+    }
+
     // File-based theme (crystal-dark, solarized-light, etc.) - fetch and apply colors
     try {
       const themeData = await window.electronAPI.invoke('theme:get', resolvedTheme);

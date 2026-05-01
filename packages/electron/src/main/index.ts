@@ -60,6 +60,7 @@ import {
     wasCommunityPopupShownThisLaunch,
     markClaudeCodeInstallationChecked,
     setTheme,
+    clearPendingThemeFallback,
     updateWorkspaceState,
     runMigrations,
     getAppSetting
@@ -1636,6 +1637,8 @@ app.whenReady().then(async () => {
     // Set up IPC handler for theme changes from renderer
     safeOn('set-theme', (event, theme: AppTheme, isDark?: boolean) => {
         setTheme(theme, isDark);
+        // User explicitly applied a theme — clear any pending fallback banner
+        clearPendingThemeFallback();
         updateNativeTheme();
         BrowserWindow.getAllWindows().forEach(window => {
             window.webContents.send('theme-change', theme);

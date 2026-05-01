@@ -39,6 +39,7 @@ import type {
   ExtensionAIModel,
 } from './types';
 import { getExtensionPlatformService } from './ExtensionPlatformService';
+import { registerThemeContribution } from '../editor/themes/registry';
 
 const MANIFEST_FILENAME = 'manifest.json';
 
@@ -127,10 +128,26 @@ function validateManifest(
     !contributions?.panels &&
     !contributions?.settingsPanel &&
     !contributions?.newFileMenu &&
+    !contributions?.configuration &&
+    !contributions?.themes;
+
+  // Theme-only extensions: themes are pure data, no JS required
+  const onlyThemes = contributions?.themes &&
+    !contributions?.claudePlugin &&
+    !contributions?.customEditors &&
+    !contributions?.documentHeaders &&
+    !contributions?.aiTools &&
+    !contributions?.slashCommands &&
+    !contributions?.nodes &&
+    !contributions?.transformers &&
+    !contributions?.hostComponents &&
+    !contributions?.panels &&
+    !contributions?.settingsPanel &&
+    !contributions?.newFileMenu &&
     !contributions?.configuration;
 
-  // Main is required unless the extension only contributes a Claude plugin
-  if (!onlyClaudePlugin) {
+  // Main is required unless the extension only contributes a Claude plugin or themes
+  if (!onlyClaudePlugin && !onlyThemes) {
     if (typeof m.main !== 'string' || !m.main) {
       errors.push({
         error: `Missing or invalid 'main'`,
@@ -496,6 +513,69 @@ function validateManifest(
                 error: `panels[${index}] has invalid 'placement'`,
                 field: `contributions.panels[${index}].placement`,
                 suggestion: 'Use "sidebar", "fullscreen", "floating", or "bottom"',
+              });
+            }
+          });
+        }
+      }
+
+      // Validate themes
+      if (contributions.themes !== undefined) {
+        if (!Array.isArray(contributions.themes)) {
+          errors.push({
+            error: `Invalid 'contributions.themes' - should be an array`,
+            field: 'contributions.themes',
+            suggestion: 'themes should be an array of theme contributions',
+          });
+        } else {
+          const themeIdPattern = /^[a-z0-9][a-z0-9-]*$/;
+          const seenIds = new Set<string>();
+          contributions.themes.forEach((theme, index) => {
+            const themeRecord = theme as Record<string, unknown>;
+            if (typeof themeRecord.id !== 'string' || !themeRecord.id) {
+              errors.push({
+                error: `themes[${index}] missing 'id'`,
+                field: `contributions.themes[${index}].id`,
+                suggestion: 'Add a unique theme id like "dracula"',
+              });
+            } else if (!themeIdPattern.test(themeRecord.id)) {
+              errors.push({
+                error: `themes[${index}] has invalid 'id': "${themeRecord.id}"`,
+                field: `contributions.themes[${index}].id`,
+                suggestion: 'Theme id should match /^[a-z0-9][a-z0-9-]*$/, e.g., "dracula" or "my-theme"',
+              });
+            } else if (seenIds.has(themeRecord.id)) {
+              errors.push({
+                error: `themes[${index}] has duplicate 'id': "${themeRecord.id}"`,
+                field: `contributions.themes[${index}].id`,
+                suggestion: 'Each theme id must be unique within an extension',
+              });
+            } else {
+              seenIds.add(themeRecord.id);
+            }
+            if (typeof themeRecord.name !== 'string' || !themeRecord.name) {
+              errors.push({
+                error: `themes[${index}] missing 'name'`,
+                field: `contributions.themes[${index}].name`,
+                suggestion: 'Add a display name shown in the Themes panel',
+              });
+            }
+            if (typeof themeRecord.isDark !== 'boolean') {
+              errors.push({
+                error: `themes[${index}] missing or invalid 'isDark'`,
+                field: `contributions.themes[${index}].isDark`,
+                suggestion: 'Set isDark to true for dark themes, false for light themes',
+              });
+            }
+            if (
+              typeof themeRecord.colors !== 'object' ||
+              themeRecord.colors === null ||
+              Array.isArray(themeRecord.colors)
+            ) {
+              errors.push({
+                error: `themes[${index}] missing or invalid 'colors' object`,
+                field: `contributions.themes[${index}].colors`,
+                suggestion: 'colors must be an object mapping color keys to color values',
               });
             }
           });
@@ -998,16 +1078,33 @@ export class ExtensionLoader {
       !contributions?.settingsPanel &&
       !contributions?.newFileMenu &&
       !contributions?.configuration &&
+      !contributions?.themes &&
+      !manifest.main;
+
+    // Theme-only extensions: pure data contribution, no JS entry point needed
+    const isThemesOnly = contributions?.themes &&
+      !contributions?.claudePlugin &&
+      !contributions?.customEditors &&
+      !contributions?.documentHeaders &&
+      !contributions?.aiTools &&
+      !contributions?.slashCommands &&
+      !contributions?.nodes &&
+      !contributions?.transformers &&
+      !contributions?.hostComponents &&
+      !contributions?.panels &&
+      !contributions?.settingsPanel &&
+      !contributions?.newFileMenu &&
+      !contributions?.configuration &&
       !manifest.main;
 
     try {
       let module: ExtensionModule;
 
-      if (isClaudePluginOnly) {
-        // Claude plugin-only extensions don't have runtime code
-        // Create a stub module for them
+      if (isClaudePluginOnly || isThemesOnly) {
+        // Plugin-only / theme-only extensions don't have runtime code.
+        // Create a stub module for them.
         console.info(
-          `[ExtensionLoader] Extension ${manifest.id} is Claude plugin-only, skipping module load`
+          `[ExtensionLoader] Extension ${manifest.id} has no JS entry point (${isThemesOnly ? 'themes-only' : 'claude-plugin-only'}), skipping module load`
         );
         module = {};
       } else {
@@ -1044,12 +1141,27 @@ export class ExtensionLoader {
       // Create context
       const context = createExtensionContext(manifest, extensionPath);
 
+      // Register theme contributions (pure data — no module code involved)
+      const themeUnregisters: Array<() => void> = [];
+      const themeContributions = manifest.contributions?.themes ?? [];
+      for (const contribution of themeContributions) {
+        try {
+          themeUnregisters.push(registerThemeContribution(manifest.id, contribution));
+        } catch (error) {
+          console.error(
+            `[ExtensionLoader] Failed to register theme '${contribution.id}' from extension ${manifest.id}:`,
+            error
+          );
+        }
+      }
+
       // Create loaded extension object
       const loaded: LoadedExtension = {
         manifest,
         module,
         context,
         disposeStyles,
+        themeUnregisters,
         enabled: true,
         dispose: async () => {
           await this.unloadExtension(manifest.id);
@@ -1061,8 +1173,11 @@ export class ExtensionLoader {
         try {
           await module.activate(context);
         } catch (error) {
-          // Clean up styles if activation fails
+          // Clean up styles and theme registrations if activation fails
           disposeStyles?.();
+          themeUnregisters.forEach(fn => {
+            try { fn(); } catch { /* ignore */ }
+          });
           return {
             success: false,
             error: `Extension ${manifest.id} activation failed: ${error}`,
@@ -1121,6 +1236,21 @@ export class ExtensionLoader {
 
       // Remove injected styles
       loaded.disposeStyles?.();
+
+      // Unregister theme contributions
+      if (loaded.themeUnregisters) {
+        for (const fn of loaded.themeUnregisters) {
+          try {
+            fn();
+          } catch (error) {
+            console.error(
+              `[ExtensionLoader] Error unregistering theme for ${extensionId}:`,
+              error
+            );
+          }
+        }
+        loaded.themeUnregisters = [];
+      }
 
       // Remove from loaded extensions
       this.loadedExtensions.delete(extensionId);

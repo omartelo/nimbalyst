@@ -42,6 +42,10 @@ export interface ExtensionSettings {
 interface AppStoreSchema {
   theme: AppTheme;
   themeIsDark?: boolean; // Whether the current theme is dark (used for extension themes)
+  // Set when the active theme disappeared (extension uninstalled/disabled or
+  // file removed) and the runtime fell back to a base theme. Cleared when the
+  // user explicitly applies a theme or dismisses the banner in the Themes panel.
+  pendingThemeFallback?: { missingId: string; appliedId: string };
   recent: {
     workspaces: RecentItem[];
     documents: RecentItem[];
@@ -706,6 +710,18 @@ export function setTheme(theme: AppTheme, isDark?: boolean): void {
 
 export function getThemeIsDark(): boolean | undefined {
   return getAppStore().get('themeIsDark');
+}
+
+export function getPendingThemeFallback(): { missingId: string; appliedId: string } | undefined {
+  return getAppStore().get('pendingThemeFallback');
+}
+
+export function setPendingThemeFallback(value: { missingId: string; appliedId: string }): void {
+  getAppStore().set('pendingThemeFallback', value);
+}
+
+export function clearPendingThemeFallback(): void {
+  getAppStore().delete('pendingThemeFallback');
 }
 
 // getThemeSync resolves 'system'/'auto' to the actual theme for the renderer

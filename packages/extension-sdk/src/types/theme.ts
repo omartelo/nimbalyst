@@ -30,8 +30,16 @@ export type ThemeColorKey =
 export type ThemeColors = Partial<Record<ThemeColorKey, string>>;
 
 /**
+ * Where a theme entry returned by `theme:list` originated from.
+ */
+export type ThemeManifestOrigin = 'builtin' | 'user' | 'extension';
+
+/**
  * Theme manifest schema (theme.json).
  * This is the schema for standalone theme packages.
+ *
+ * The same shape is also returned by the runtime `theme:list` IPC for
+ * extension-contributed themes, with `origin` and `contributedBy` populated.
  */
 export interface ThemeManifest {
   /** Unique theme identifier (e.g., 'solarized-dark') */
@@ -70,6 +78,18 @@ export interface ThemeManifest {
 
   /** Homepage or repository URL */
   homepage?: string;
+
+  /**
+   * Where this theme came from. Populated by the runtime when listing themes.
+   * Not part of the on-disk theme.json schema.
+   */
+  origin?: ThemeManifestOrigin;
+
+  /**
+   * Extension ID that contributed this theme (only set when `origin === 'extension'`).
+   * Not part of the on-disk theme.json schema.
+   */
+  contributedBy?: string;
 }
 
 /**

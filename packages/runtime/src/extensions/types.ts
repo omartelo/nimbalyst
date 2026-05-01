@@ -84,6 +84,13 @@ export interface LoadedExtension {
   /** Function to remove injected styles */
   disposeStyles?: () => void;
 
+  /**
+   * Functions returned by `registerThemeContribution` for each theme this
+   * extension declared. Invoked on unload to remove the themes from the
+   * runtime registry.
+   */
+  themeUnregisters?: Array<() => void>;
+
   /** Whether the extension is currently enabled */
   enabled: boolean;
 

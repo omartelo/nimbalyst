@@ -129,11 +129,31 @@ function validateManifest(manifestPath: string): {
     }
 
     if (!manifest.main) {
-      warnings.push({
-        field: "main",
-        message: 'Missing required field "main"',
-        severity: "error",
-      });
+      // `main` is required unless the extension only contributes themes or
+      // a Claude plugin -- both are pure-data contributions with no JS entry.
+      const contributions = manifest.contributions ?? {};
+      const hasOtherContributions =
+        contributions.customEditors?.length ||
+        contributions.documentHeaders?.length ||
+        contributions.aiTools?.length ||
+        contributions.slashCommands?.length ||
+        contributions.nodes?.length ||
+        contributions.transformers?.length ||
+        contributions.hostComponents?.length ||
+        contributions.panels?.length ||
+        contributions.settingsPanel ||
+        contributions.newFileMenu?.length ||
+        contributions.configuration;
+      const isDataOnly =
+        !hasOtherContributions &&
+        (contributions.themes?.length || contributions.claudePlugin);
+      if (!isDataOnly) {
+        warnings.push({
+          field: "main",
+          message: 'Missing required field "main"',
+          severity: "error",
+        });
+      }
     }
 
     if (!manifest.apiVersion) {

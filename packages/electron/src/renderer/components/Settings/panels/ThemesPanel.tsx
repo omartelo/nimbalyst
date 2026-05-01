@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useAtomValue, useSetAtom } from 'jotai';
 import { MaterialSymbol } from '@nimbalyst/runtime';
 import type { ThemeManifest } from '@nimbalyst/extension-sdk';
 import { useTheme } from '../../../hooks/useTheme';
+import { pendingThemeFallbackAtom } from '../../../store/atoms/themeFallback';
 
 interface ThemesPanelProps {
   scope: 'user' | 'project';
@@ -10,6 +12,8 @@ interface ThemesPanelProps {
 
 interface ThemeWithState extends ThemeManifest {
   isBuiltIn: boolean;
+  isExtension: boolean;
+  isUser: boolean;
   isActive: boolean;
 }
 
@@ -19,6 +23,8 @@ export const ThemesPanel: React.FC<ThemesPanelProps> = ({ scope, workspacePath }
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedThemeId, setSelectedThemeId] = useState<string | null>(null);
+  const pendingFallback = useAtomValue(pendingThemeFallbackAtom);
+  const setPendingFallback = useSetAtom(pendingThemeFallbackAtom);
 
   // Load themes
   const loadThemes = useCallback(async () => {
@@ -30,7 +36,9 @@ export const ThemesPanel: React.FC<ThemesPanelProps> = ({ scope, workspacePath }
 
       const themesWithState: ThemeWithState[] = themeManifests.map((manifest: ThemeManifest) => ({
         ...manifest,
-        isBuiltIn: ['light', 'dark', 'crystal-dark', 'solarized-dark', 'solarized-light', 'monokai'].includes(manifest.id),
+        isBuiltIn: manifest.origin === 'builtin',
+        isExtension: manifest.origin === 'extension',
+        isUser: manifest.origin === 'user',
         isActive: manifest.id === themeId,
       }));
 
@@ -46,6 +54,23 @@ export const ThemesPanel: React.FC<ThemesPanelProps> = ({ scope, workspacePath }
   useEffect(() => {
     loadThemes();
   }, [loadThemes]);
+
+  // Refresh when extensions register/unregister themes (main broadcasts).
+  useEffect(() => {
+    const unsubscribe = window.electronAPI?.on?.('theme:list-changed', () => {
+      void loadThemes();
+    });
+    return () => {
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
+  }, [loadThemes]);
+
+  const handleDismissFallback = useCallback(() => {
+    if (window.electronAPI?.send) {
+      window.electronAPI.send('theme:dismiss-pending-fallback');
+    }
+    setPendingFallback(null);
+  }, [setPendingFallback]);
 
   // Handle theme selection
   const handleThemeSelect = useCallback(async (themeIdToSelect: string) => {
@@ -118,9 +143,10 @@ export const ThemesPanel: React.FC<ThemesPanelProps> = ({ scope, workspacePath }
     return theme.isDark ? 'dark_mode' : 'light_mode';
   };
 
-  // Group themes
+  // Group themes by origin
   const builtInThemes = themes.filter(t => t.isBuiltIn);
-  const userThemes = themes.filter(t => !t.isBuiltIn);
+  const userThemes = themes.filter(t => t.isUser);
+  const extensionThemes = themes.filter(t => t.isExtension);
   const selectedTheme = themes.find(t => t.id === selectedThemeId);
 
   if (loading) {
@@ -155,6 +181,24 @@ export const ThemesPanel: React.FC<ThemesPanelProps> = ({ scope, workspacePath }
       {error && (
         <div className="mb-4 p-3 bg-nim-error/10 border border-nim-error/30 rounded-md text-nim-error text-sm">
           {error}
+        </div>
+      )}
+
+      {/* Pending fallback banner */}
+      {pendingFallback && (
+        <div className="theme-fallback-banner mb-4 p-3 bg-nim-warning/10 border border-nim-warning/30 rounded-md flex items-start gap-2">
+          <MaterialSymbol icon="info" size={18} className="text-nim-warning shrink-0 mt-0.5" />
+          <div className="flex-1 text-sm text-nim">
+            The theme <span className="font-semibold">{pendingFallback.missingId}</span> is no longer available. Switched to <span className="font-semibold">{pendingFallback.appliedId}</span>.
+          </div>
+          <button
+            data-testid="dismiss-theme-fallback"
+            onClick={handleDismissFallback}
+            className="p-1 text-nim-muted hover:text-nim hover:bg-nim-hover rounded transition-colors"
+            title="Dismiss"
+          >
+            <MaterialSymbol icon="close" size={16} />
+          </button>
         </div>
       )}
 
@@ -232,7 +276,7 @@ export const ThemesPanel: React.FC<ThemesPanelProps> = ({ scope, workspacePath }
         {/* User themes */}
         {userThemes.length > 0 && (
           <div className="mb-6">
-            <h3 className="text-sm font-medium text-nim mb-3">Installed Themes</h3>
+            <h3 className="text-sm font-medium text-nim mb-3">User Themes</h3>
             <div className="space-y-2">
               {userThemes.map((theme) => (
                 <div
@@ -285,17 +329,64 @@ export const ThemesPanel: React.FC<ThemesPanelProps> = ({ scope, workspacePath }
           </div>
         )}
 
-        {/* Empty state for user themes */}
-        {userThemes.length === 0 && (
+        {/* Extension themes */}
+        {extensionThemes.length > 0 && (
+          <div className="extension-themes-section mb-6">
+            <h3 className="text-sm font-medium text-nim mb-3">Extension Themes</h3>
+            <div className="space-y-2">
+              {extensionThemes.map((theme) => (
+                <div
+                  key={theme.id}
+                  data-testid="extension-theme-item"
+                  className={`flex items-center gap-3 p-3 border rounded-md cursor-pointer transition-all ${
+                    selectedThemeId === theme.id
+                      ? 'border-nim-primary bg-nim-primary/5'
+                      : 'border-nim bg-nim-secondary hover:bg-nim-tertiary'
+                  }`}
+                  onClick={() => setSelectedThemeId(theme.id)}
+                >
+                  <div className="flex items-center justify-center w-10 h-10 bg-nim-tertiary rounded-md">
+                    <MaterialSymbol icon={getThemeIcon(theme)} size={20} />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-sm font-medium text-nim">{theme.name}</div>
+                    <div className="text-xs text-nim-muted">
+                      {theme.contributedBy ? `Contributed by ${theme.contributedBy}` : 'Extension theme'}
+                    </div>
+                  </div>
+                  {theme.isActive && (
+                    <div className="flex items-center gap-1 text-nim-primary text-xs">
+                      <MaterialSymbol icon="check" size={14} />
+                    </div>
+                  )}
+                  {!theme.isActive && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleThemeSelect(theme.id);
+                      }}
+                      className="px-3 py-1 text-xs text-nim-muted hover:text-nim hover:bg-nim-hover rounded transition-colors"
+                    >
+                      Apply
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Empty state when no installed themes (user or extension) */}
+        {userThemes.length === 0 && extensionThemes.length === 0 && (
           <div className="mb-6">
             <h3 className="text-sm font-medium text-nim mb-3">Installed Themes</h3>
             <div className="flex flex-col items-center justify-center p-8 bg-nim-secondary border border-nim border-dashed rounded-md">
               <MaterialSymbol icon="palette" size={32} className="text-nim-muted mb-2" />
               <p className="text-sm text-nim-muted text-center">
-                No user themes installed yet
+                No user or extension themes installed yet
               </p>
               <p className="text-xs text-nim-faint text-center mt-1">
-                Install themes from files or the marketplace
+                Install themes from files, the marketplace, or via theme extensions
               </p>
             </div>
           </div>

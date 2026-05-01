@@ -25,6 +25,7 @@ import { initializeExtensionEditorBridge } from '../extensions/ExtensionEditorBr
 import { initializeExtensionPluginBridge } from '../extensions/ExtensionPluginBridge';
 import { initializeExtensionDocumentHeaderBridge, syncExtensionDocumentHeaders } from '../extensions/ExtensionDocumentHeaderBridge';
 import { syncExtensionEditors } from '../extensions/ExtensionEditorBridge';
+import { initializeExtensionThemeBridge } from '../extensions/ExtensionThemeBridge';
 import { hiddenTabManager } from '../services/HiddenTabManager';
 
 // Track workspace path for MCP tool registration
@@ -659,6 +660,10 @@ export async function registerExtensionSystem(): Promise<void> {
 
     // Initialize the document header bridge to register extension-contributed document headers
     initializeExtensionDocumentHeaderBridge();
+
+    // Initialize the theme bridge so extension-contributed themes propagate
+    // to the main process for theme:list and active-theme reconciliation.
+    initializeExtensionThemeBridge();
 
     // Set up IPC listener for screenshot capture requests
     setupScreenshotIPCListener();

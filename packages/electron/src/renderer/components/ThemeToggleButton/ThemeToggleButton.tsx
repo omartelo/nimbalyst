@@ -26,14 +26,24 @@ export const ThemeToggleButton: React.FC<ThemeToggleButtonProps> = ({ className 
   const menuRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
-  // Load available themes
+  // Load available themes; refresh when extensions register/unregister themes.
   useEffect(() => {
+    let cancelled = false;
     const loadThemes = async () => {
       const themes = await getAllAvailableThemesAsync();
-      setAvailableThemes(themes);
+      if (!cancelled) setAvailableThemes(themes);
     };
 
     loadThemes();
+
+    const unsubscribe = window.electronAPI?.on?.('theme:list-changed', () => {
+      void loadThemes();
+    });
+
+    return () => {
+      cancelled = true;
+      if (typeof unsubscribe === 'function') unsubscribe();
+    };
   }, []);
 
   // Close menu when clicking outside

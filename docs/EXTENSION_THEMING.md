@@ -35,6 +35,57 @@ To add themes to your extension, add a `themes` array to your `manifest.json`:
 
 No JavaScript code is required for theme-only contributions.
 
+## Manifest-only theme extensions
+
+If your extension only contributes themes (no editors, AI tools, panels, plugins, etc.), you can ship it as a **manifest-only extension** -- no `main` field, no `dist/`, no compiled JavaScript. The runtime treats the package as inert except for the theme registration.
+
+```json
+{
+  "id": "com.example.theme-pack",
+  "name": "Theme Pack",
+  "version": "1.0.0",
+  "contributions": {
+    "themes": [
+      { "id": "ocean", "name": "Ocean", "isDark": true, "colors": { "primary": "#0aa5cd" } },
+      { "id": "forest", "name": "Forest", "isDark": true, "colors": { "primary": "#2da44e" } }
+    ]
+  }
+}
+```
+
+That's the entire extension -- a single `manifest.json` in a directory. No build step required. The marketplace packaging accepts this shape; the dev-tools manifest validator no longer flags missing `main` for theme-only extensions.
+
+## Namespacing & ID collisions
+
+Theme IDs are namespaced as `extensionId:themeId` at runtime so two extensions can declare the same `id` without conflict. Extension `com.acme.themes` declaring `id: "dracula"` becomes `com.acme.themes:dracula` in the registry; another extension declaring `id: "dracula"` becomes `<their-id>:dracula`. Both appear independently in the Themes panel.
+
+If your extension declares two themes with the same `id` in its own manifest, validation fails and the extension does not load.
+
+If a filesystem theme bundle already uses an ID like `solarized-dark`, an extension that also declares `solarized-dark` is fine -- namespacing keeps them distinct.
+
+## Color derivation
+
+Beyond merging your overrides on top of the base theme, the runtime *derives* missing domain-specific colors from your overrides so tables, code blocks, scrollbars, and the terminal stay consistent with your palette. The derivations (in `packages/runtime/src/editor/themes/registry.ts`) include:
+
+- **Tables**: `table-header` from `bg-secondary`, `table-cell` from `bg`, `table-stripe` from `bg-tertiary`, `table-border` from `border`.
+- **Code blocks**: `code-bg` from `bg-secondary`, `code-text` from `text`, `code-border` from `border`, `code-gutter` from `bg-tertiary`.
+- **Toolbar**: `toolbar-bg` from `bg`, `toolbar-border` from `border`, `toolbar-hover` from `bg-hover`.
+- **Scrollbar**: `scrollbar-thumb` from `text-faint`, `scrollbar-thumb-hover` from `text-muted`.
+- **Quote**: `quote-text` from `text-muted`, `quote-border` from `border`.
+- **Terminal**: `terminal-bg` from `bg-secondary`, `terminal-fg` from `text`, `terminal-cursor` from `primary`, `terminal-selection` from `bg-selected`. ANSI red/green/yellow/blue derive from `error` / `success` / `warning` / `info` respectively.
+
+If you want full control over any derived value, set the domain-specific key explicitly and the derivation step is skipped for that key.
+
+## What happens when a theme disappears
+
+If the user has applied an extension theme and then disables or uninstalls the extension (or an update removes the theme), the runtime falls back to a base theme:
+
+- The fallback uses the missing theme's `isDark` value to pick `light` or `dark`.
+- An inline banner appears at the top of the **Themes** panel naming the missing ID and the applied fallback. It stays until the user dismisses it or applies a different theme.
+- Re-enabling the extension does **not** auto-restore the theme. The user has to apply it manually.
+
+Disable and uninstall are treated identically.
+
 ## Theme Structure
 
 Each theme contribution has the following properties:
