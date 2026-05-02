@@ -1678,13 +1678,14 @@ app.whenReady().then(async () => {
     // Set up a loader that reads customClaudeCodePath fresh from the store on each query,
     // so changes in the UI take effect without restarting the app. Project-level overrides
     // take precedence over the global value when a workspace path is provided.
-    const { store, getAIProviderOverrides } = await import('./utils/store');
+    const { store } = await import('./utils/store');
+    const { getAIProviderOverridesWithWorktreeFallback } = await import('./utils/aiSettingsMerge');
     ClaudeCodeProvider.setCustomClaudeCodePathLoader((workspacePath?: string) => {
       const globalPath = (store.get('customClaudeCodePath', '') as string) || '';
       if (!workspacePath) {
         return globalPath;
       }
-      const overrides = getAIProviderOverrides(workspacePath);
+      const overrides = getAIProviderOverridesWithWorktreeFallback(workspacePath);
       if (overrides?.customClaudeCodePath !== undefined) {
         return overrides.customClaudeCodePath;
       }

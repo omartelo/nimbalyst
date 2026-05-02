@@ -7,6 +7,7 @@
  */
 
 import { AIProviderOverrides, ProviderOverride, getAIProviderOverrides } from './store';
+import { resolveProjectPath } from './workspaceDetection';
 
 /**
  * Global AI settings structure (from ai-settings electron-store)
@@ -104,6 +105,30 @@ function mergeProviderSettings(
 }
 
 /**
+ * Read AI provider overrides for a workspace, falling back from a worktree path to the
+ * parent project path only when the worktree has no direct override of its own.
+ */
+export function getAIProviderOverridesWithWorktreeFallback(
+  workspacePath?: string
+): AIProviderOverrides | undefined {
+  if (!workspacePath) {
+    return undefined;
+  }
+
+  const overrides = getAIProviderOverrides(workspacePath);
+  if (overrides) {
+    return overrides;
+  }
+
+  const projectPath = resolveProjectPath(workspacePath);
+  if (projectPath === workspacePath) {
+    return undefined;
+  }
+
+  return getAIProviderOverrides(projectPath);
+}
+
+/**
  * Merge global AI settings with project-level overrides.
  *
  * @param globalSettings - The global AI settings from ai-settings store
@@ -127,7 +152,7 @@ export function mergeAISettings(
   }
 
   // Get project-level overrides
-  const projectOverrides = getAIProviderOverrides(workspacePath);
+  const projectOverrides = getAIProviderOverridesWithWorktreeFallback(workspacePath);
 
   // If no overrides, return global settings
   if (!projectOverrides) {
