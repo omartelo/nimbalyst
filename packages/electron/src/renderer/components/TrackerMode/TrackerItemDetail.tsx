@@ -277,6 +277,7 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
   const [externalContentEpoch, setExternalContentEpoch] = useState(0);
   const getContentFnRef = useRef<(() => string) | null>(null);
   const contentSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const contentSaveInFlightRef = useRef(false);
   // Baseline of what was last persisted to PGLite for THIS item. Used as a
   // safety rail: if the collab editor mounts empty (e.g., because Lexical's
   // `main` binding is empty while the server Y.Doc only has legacy bytes
@@ -368,6 +369,13 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
     // Initial load hasn't completed yet -- the load effect owns this state
     if (baseline === null) return;
     if (atomContentString === baseline) return;
+    // Local typing wins over a racing external write. If this panel already
+    // has a pending or in-flight body save, remounting Lexical here would
+    // discard the user's unsaved characters. Let the local save finish and
+    // intentionally keep the editor on the locally-authored content.
+    if (contentSaveTimerRef.current || contentSaveInFlightRef.current) {
+      return;
+    }
     // External update detected: refresh the editor.
     loadedBaselineRef.current = atomContentString;
     setContentMarkdown(atomContentString);
@@ -489,6 +497,7 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
     }
     if (contentSaveTimerRef.current) clearTimeout(contentSaveTimerRef.current);
     contentSaveTimerRef.current = setTimeout(async () => {
+      contentSaveTimerRef.current = null;
       // Update the baseline before the IPC round-trip. The main-process
       // updateTrackerItemContent path also broadcasts tracker-items-changed,
       // which races with the invoke result -- if the broadcast arrives first
@@ -498,6 +507,7 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
       // owns the live value and the next dirty event will retry, so a
       // briefly-optimistic baseline is safe.
       loadedBaselineRef.current = markdown;
+      contentSaveInFlightRef.current = true;
       try {
         await window.electronAPI.documentService.updateTrackerItemContent({
           itemId: item!.id,
@@ -505,6 +515,8 @@ export const TrackerItemDetail: React.FC<TrackerItemDetailProps> = ({
         });
       } catch (err) {
         console.error('[TrackerItemDetail] Failed to save content:', err);
+      } finally {
+        contentSaveInFlightRef.current = false;
       }
     }, 800);
   }, [item?.id]);
