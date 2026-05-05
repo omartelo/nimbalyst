@@ -313,7 +313,7 @@ export const trackerToolSchemas = [
   {
     name: "tracker_create",
     description:
-      "Create a new tracker item (bug, task, plan, idea, decision, or any custom type).\n\nIMPORTANT: Never set status to 'done' or 'completed'. Use 'in-review' or 'in-progress' instead. Only the user can mark items as done.",
+      "Create a new tracker item (bug, task, plan, idea, decision, or any custom type).\n\nBy default, the new item is NOT linked to the current session. Pass linkSession: true to link it, or call tracker_link_session afterward.\n\nIMPORTANT: Never set status to 'done' or 'completed'. Use 'in-review' or 'in-progress' instead. Only the user can mark items as done.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -390,6 +390,10 @@ export const trackerToolSchemas = [
         fields: {
           type: "object",
           description: "Generic field bag for setting any schema-defined field. Values here override fixed arguments above. Use this for custom fields or when you want to set fields by their schema name.",
+        },
+        linkSession: {
+          type: "boolean",
+          description: "If true, link the current AI session to the newly created item. Defaults to false -- creation does NOT auto-link the session.",
         },
       },
       required: ["type", "title"],
@@ -1016,10 +1020,13 @@ export async function handleTrackerCreate(
       }
     }
 
-    // Auto-link session to the newly created tracker item
-    if (sessionId) {
+    // Link the current session only when explicitly requested.
+    // Why: auto-linking on every create polluted sessions with unrelated tracker
+    // items (the agent often creates a tracker item as a side effect, not as the
+    // session's subject). Linking is now opt-in via args.linkSession; agents that
+    // really do want a link can pass linkSession: true or call tracker_link_session.
+    if (sessionId && args.linkSession === true) {
       await createBidirectionalLink(id, sessionId);
-      // Notify session linked tracker changed
       const sessionResult = await db.query<any>(
         `SELECT metadata FROM ai_sessions WHERE id = $1`,
         [sessionId]
