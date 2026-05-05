@@ -64,7 +64,6 @@ import {
     updateWorkspaceState,
     runMigrations,
     getAppSetting,
-    store
 } from './utils/store';
 import { getAIProviderOverridesWithWorktreeFallback } from './utils/aiSettingsMerge';
 import { registerMCPConfigHandlers } from './ipc/MCPConfigHandlers';
@@ -1726,6 +1725,16 @@ app.whenReady().then(async () => {
     // worktree-to-parent inheritance. Only fall through to the global setting when no
     // project-level override exists at all (which is the intended fallback, not a routing
     // failure). A missing workspacePath here would mean an upstream wiring bug, so throw.
+    //
+    // The global value is read via aiService.getCustomClaudeCodePath() so it comes from the
+    // ai-settings electron-store -- the same store ai:saveSettings writes to. Reading from
+    // the app-settings store (`store.get('customClaudeCodePath', ...)`) silently returned ''
+    // because the key is never written there, which made the User-scope custom path appear
+    // ignored on every launch (issue #165).
+    const aiSvcForClaudePath = aiService;
+    if (!aiSvcForClaudePath) {
+      throw new Error('[ClaudeCodeProvider] AIService must be initialized before the customClaudeCodePath loader');
+    }
     ClaudeCodeProvider.setCustomClaudeCodePathLoader((workspacePath: string) => {
       if (!workspacePath) {
         throw new Error('[ClaudeCodeProvider] customClaudeCodePathLoader called without a workspacePath');
@@ -1736,7 +1745,7 @@ app.whenReady().then(async () => {
         return projectOverride;
       }
 
-      return (store.get('customClaudeCodePath', '') as string) || '';
+      return aiSvcForClaudePath.getCustomClaudeCodePath();
     });
     logger.main.info('[ClaudeCodeProvider] Initialized customClaudeCodePath loader (workspace-aware)');
 

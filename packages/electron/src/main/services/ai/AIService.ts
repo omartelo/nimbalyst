@@ -414,6 +414,21 @@ export class AIService {
   }
 
   /**
+   * Returns the User-scope custom Claude Code executable path from the
+   * ai-settings store (the same store ai:saveSettings writes to).
+   *
+   * Exposed so the main process loader in index.ts can read this value from
+   * the correct store. Reading directly from the app-settings store via
+   * `store.get('customClaudeCodePath', ...)` always returns '' because the
+   * key is never written there, which silently dropped the User-scope path
+   * and caused the SDK to fall back to the bundled native binary instead of
+   * the user's wrapper script (issue #165).
+   */
+  public getCustomClaudeCodePath(): string {
+    return (this.getSettingsStore().get('customClaudeCodePath', '') as string) || '';
+  }
+
+  /**
    * Get API key for a provider, considering project-level overrides.
    * Project-specific API keys take precedence over global keys.
    */
