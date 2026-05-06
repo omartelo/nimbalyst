@@ -177,6 +177,11 @@ interface AppStoreSchema {
   // Path of the project currently visible in the rail. Restored on launch
   // so the user lands on the same project.
   activeProjectPath?: string | null;
+  // When true, the rail rehydrates with the projects that were warm at
+  // last app close. When false (default), the rail starts empty and is
+  // seeded only with the project the user picks from the launch screen
+  // — additional projects must be added explicitly.
+  restorePreviousProjectsOnLaunch?: boolean;
 }
 
 /**
@@ -2061,6 +2066,14 @@ export function getActiveProjectPath(): string | null {
 
 export function setActiveProjectPath(path: string | null): void {
   getAppStore().set('activeProjectPath', path);
+}
+
+export function getRestorePreviousProjectsOnLaunch(): boolean {
+  return getAppStore().get('restorePreviousProjectsOnLaunch', false);
+}
+
+export function setRestorePreviousProjectsOnLaunch(enabled: boolean): void {
+  getAppStore().set('restorePreviousProjectsOnLaunch', enabled);
 }
 
 export function runMigrations(currentVersion: string): void {

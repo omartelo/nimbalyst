@@ -53,6 +53,14 @@ export const activeWorkspacePathAtom = atom<string | null>(null);
 export const multiProjectModeAtom = atom<boolean>(false);
 
 /**
+ * When true, the rail rehydrates with the projects that were open at last
+ * app close. When false (default), the rail starts with only the project
+ * the user picked from the launch screen; additional projects are added
+ * explicitly via the `+` button.
+ */
+export const restorePreviousProjectsAtom = atom<boolean>(false);
+
+/**
  * Ordered list of open projects in the rail. First entry is leftmost.
  *
  * Capped at `MAX_OPEN_PROJECTS` to bound memory of warm projects.
@@ -192,26 +200,33 @@ export async function initOpenProjects(): Promise<void> {
   if (!window.electronAPI?.invoke) return;
 
   try {
-    const [mode, paths, activePath] = await Promise.all([
+    const [mode, restorePrev, paths, activePath] = await Promise.all([
       window.electronAPI.invoke('app:get-multi-project-mode') as Promise<boolean>,
+      window.electronAPI.invoke('app:get-restore-previous-projects') as Promise<boolean>,
       window.electronAPI.invoke('app:get-open-projects') as Promise<string[]>,
       window.electronAPI.invoke('app:get-active-project-path') as Promise<string | null>,
     ]);
 
     store.set(multiProjectModeAtom, !!mode);
+    store.set(restorePreviousProjectsAtom, !!restorePrev);
 
-    const validPaths = Array.isArray(paths) ? paths.filter((p) => typeof p === 'string' && p.length > 0) : [];
-    const projects: OpenProject[] = validPaths.map((path) => ({
-      path,
-      name: basenameFromPath(path),
-      openedAt: Date.now(),
-    }));
-    store.set(openProjectsAtom, projects);
+    // Only rehydrate the rail when the user opted in. Otherwise the rail
+    // starts empty and is seeded by the project the user picks from the
+    // launch screen (handled in App.tsx loadInitialState).
+    if (restorePrev) {
+      const validPaths = Array.isArray(paths) ? paths.filter((p) => typeof p === 'string' && p.length > 0) : [];
+      const projects: OpenProject[] = validPaths.map((path) => ({
+        path,
+        name: basenameFromPath(path),
+        openedAt: Date.now(),
+      }));
+      store.set(openProjectsAtom, projects);
 
-    if (activePath && validPaths.includes(activePath)) {
-      store.set(activeWorkspacePathAtom, activePath);
-    } else if (projects.length > 0) {
-      store.set(activeWorkspacePathAtom, projects[0].path);
+      if (activePath && validPaths.includes(activePath)) {
+        store.set(activeWorkspacePathAtom, activePath);
+      } else if (projects.length > 0) {
+        store.set(activeWorkspacePathAtom, projects[0].path);
+      }
     }
   } catch (err) {
     console.error('[openProjects] Failed to load multi-project state:', err);
@@ -223,6 +238,12 @@ export async function initOpenProjects(): Promise<void> {
       const mode = store.get(multiProjectModeAtom);
       window.electronAPI?.invoke?.('app:set-multi-project-mode', mode).catch((err: unknown) => {
         console.error('[openProjects] Failed to persist multiProjectMode:', err);
+      });
+    }),
+    store.sub(restorePreviousProjectsAtom, () => {
+      const value = store.get(restorePreviousProjectsAtom);
+      window.electronAPI?.invoke?.('app:set-restore-previous-projects', value).catch((err: unknown) => {
+        console.error('[openProjects] Failed to persist restorePreviousProjects:', err);
       });
     }),
     store.sub(openProjectsAtom, () => schedulePersistOpenProjects()),

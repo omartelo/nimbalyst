@@ -347,6 +347,16 @@ export function registerSettingsHandlers() {
         setActiveProjectPath(path);
     });
 
+    safeHandle('app:get-restore-previous-projects', async () => {
+        const { getRestorePreviousProjectsOnLaunch } = await import('../utils/store');
+        return getRestorePreviousProjectsOnLaunch();
+    });
+
+    safeHandle('app:set-restore-previous-projects', async (_event, enabled: boolean) => {
+        const { setRestorePreviousProjectsOnLaunch } = await import('../utils/store');
+        setRestorePreviousProjectsOnLaunch(!!enabled);
+    });
+
     // Onboarding state
     safeHandle('onboarding:get', async () => {
         const { getOnboardingState } = await import('../utils/store');

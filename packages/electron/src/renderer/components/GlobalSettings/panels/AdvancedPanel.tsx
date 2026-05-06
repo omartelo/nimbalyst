@@ -28,7 +28,12 @@ import {
   trackerAutomationAtom,
   setTrackerAutomationAtom,
 } from '../../../store/atoms/trackerAutomationAtoms';
-import { multiProjectModeAtom, openProjectsAtom, activeWorkspacePathAtom } from '../../../store/atoms/openProjects';
+import {
+  multiProjectModeAtom,
+  openProjectsAtom,
+  activeWorkspacePathAtom,
+  restorePreviousProjectsAtom,
+} from '../../../store/atoms/openProjects';
 
 /** Reusable compact dropdown row */
 function DropdownRow({
@@ -427,6 +432,8 @@ export function AdvancedPanel() {
 
         <MultiProjectModeToggle />
 
+        <RestorePreviousProjectsToggle />
+
         <SettingsToggle
           checked={analyticsEnabled}
           onChange={(checked) => updateSettings({ analyticsEnabled: checked })}
@@ -695,6 +702,30 @@ function MultiProjectModeToggle() {
       onChange={handleChange}
       name="Multi-project Mode"
       description="Open multiple projects in a single window via a project rail. When off, each project opens in its own window."
+    />
+  );
+}
+
+/**
+ * Toggle for re-opening last session's rail projects on launch. Default
+ * off so a normal launch from the project picker opens just the picked
+ * project; warm rail projects must be added explicitly via the rail's
+ * `+` button.
+ */
+function RestorePreviousProjectsToggle() {
+  const [enabled, setEnabled] = useAtom(restorePreviousProjectsAtom);
+  const isMultiProject = useAtomValue(multiProjectModeAtom);
+
+  return (
+    <SettingsToggle
+      checked={enabled}
+      onChange={setEnabled}
+      name="Restore last session's projects on launch"
+      description={
+        isMultiProject
+          ? 'When on, the project rail rehydrates with every project that was open at last close. When off, only the project you pick from the launch screen opens.'
+          : 'Only takes effect when Multi-project Mode is enabled.'
+      }
     />
   );
 }

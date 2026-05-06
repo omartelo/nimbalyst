@@ -9,7 +9,7 @@
  * stays as a fallback).
  */
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   useFloating,
   FloatingPortal,
@@ -155,14 +155,30 @@ export function ProjectRail() {
     [activePath, setActivePath]
   );
 
-  const handleAdd = useCallback(async () => {
-    if (atCap) {
-      window.alert('You can have at most 8 projects open in the rail. Close one first or open in a new window.');
-      return;
-    }
-
+  const addProjectByPath = useCallback(async (workspacePath: string) => {
     if (!window.electronAPI?.invoke) return;
+    try {
+      const reg = await window.electronAPI.invoke('workspace:register-additional', { workspacePath });
+      if (!reg?.success) {
+        console.error('[ProjectRail] register-additional failed:', reg?.error);
+        return;
+      }
 
+      const project: OpenProject = {
+        path: workspacePath,
+        name: workspacePath.split(/[\\/]/).filter(Boolean).pop() || workspacePath,
+        openedAt: Date.now(),
+      };
+      addProject(project);
+
+      await window.electronAPI.invoke('workspace:set-active', { workspacePath });
+    } catch (err) {
+      console.error('[ProjectRail] addProjectByPath failed:', err);
+    }
+  }, [addProject]);
+
+  const handlePickFolder = useCallback(async () => {
+    if (!window.electronAPI?.invoke) return;
     try {
       const result = await window.electronAPI.invoke('dialog-show-open-dialog', {
         properties: ['openDirectory'],
@@ -171,27 +187,30 @@ export function ProjectRail() {
       if (result?.canceled) return;
       const picked: string | undefined = result?.filePaths?.[0];
       if (!picked) return;
-
-      // Register the path with the main process so its services start.
-      const reg = await window.electronAPI.invoke('workspace:register-additional', { workspacePath: picked });
-      if (!reg?.success) {
-        console.error('[ProjectRail] register-additional failed:', reg?.error);
-        return;
-      }
-
-      const project: OpenProject = {
-        path: picked,
-        name: picked.split(/[\\/]/).filter(Boolean).pop() || picked,
-        openedAt: Date.now(),
-      };
-      addProject(project);
-
-      // Set as active.
-      await window.electronAPI.invoke('workspace:set-active', { workspacePath: picked });
+      await addProjectByPath(picked);
     } catch (err) {
-      console.error('[ProjectRail] handleAdd failed:', err);
+      console.error('[ProjectRail] handlePickFolder failed:', err);
     }
-  }, [atCap, addProject]);
+  }, [addProjectByPath]);
+
+  const refreshRecents = useCallback(async () => {
+    if (!window.electronAPI?.invoke) return;
+    try {
+      const items = await window.electronAPI.invoke('settings:get-recent-projects') as Array<{ path: string; name: string; timestamp?: number }>;
+      setRecentProjects(Array.isArray(items) ? items : []);
+    } catch (err) {
+      console.error('[ProjectRail] failed to load recents:', err);
+    }
+  }, []);
+
+  const handleOpenAddMenu = useCallback(() => {
+    if (atCap) {
+      window.alert('You can have at most 8 projects open in the rail. Close one first or open in a new window.');
+      return;
+    }
+    refreshRecents();
+    setAddMenuOpen(true);
+  }, [atCap, refreshRecents]);
 
   const handleClose = useCallback(
     async (project: OpenProject) => {
@@ -222,6 +241,38 @@ export function ProjectRail() {
   // cursor position so it works for any rail icon without per-icon refs.
   const [menu, setMenu] = useState<{ project: OpenProject; x: number; y: number } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
+
+  // "Add project" dropdown — opens recents + folder picker action when the
+  // user clicks the `+` button.
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [recentProjects, setRecentProjects] = useState<Array<{ path: string; name: string; timestamp?: number }>>([]);
+  const addButtonRef = React.useRef<HTMLButtonElement | null>(null);
+
+  const {
+    refs: addRefs,
+    floatingStyles: addFloatingStyles,
+    context: addContext,
+  } = useFloating({
+    open: addMenuOpen,
+    onOpenChange: setAddMenuOpen,
+    placement: 'right-end',
+    middleware: [offset(8), flip(), shift({ padding: 8 })],
+  });
+  const addDismiss = useDismiss(addContext);
+  const addRole = useRole(addContext, { role: 'menu' });
+  const { getFloatingProps: getAddFloatingProps } = useInteractions([addDismiss, addRole]);
+
+  React.useEffect(() => {
+    if (addButtonRef.current) {
+      addRefs.setReference(addButtonRef.current);
+    }
+  }, [addRefs]);
+
+  const openProjectPaths = useMemo(() => new Set(openProjects.map((p) => p.path)), [openProjects]);
+  const filteredRecents = useMemo(
+    () => recentProjects.filter((r) => !openProjectPaths.has(r.path)).slice(0, 8),
+    [recentProjects, openProjectPaths]
+  );
 
   const { refs, floatingStyles, context } = useFloating({
     open: menu !== null,
@@ -291,9 +342,10 @@ export function ProjectRail() {
       })}
       {openProjects.length > 0 && <div className="project-rail-divider" aria-hidden="true" />}
       <button
+        ref={addButtonRef}
         type="button"
         className="project-rail-add"
-        onClick={handleAdd}
+        onClick={handleOpenAddMenu}
         disabled={atCap}
         data-testid="project-rail-add"
         aria-label="Add project to rail"
@@ -301,6 +353,50 @@ export function ProjectRail() {
         +
         <span className="project-rail-tooltip">{atCap ? 'Rail full (8 projects max)' : 'Add project'}</span>
       </button>
+
+      {addMenuOpen && (
+        <FloatingPortal>
+          <div
+            ref={addRefs.setFloating}
+            className="project-rail-context-menu project-rail-add-menu"
+            style={addFloatingStyles}
+            data-testid="project-rail-add-menu"
+            {...getAddFloatingProps()}
+          >
+            <button
+              type="button"
+              className="project-rail-context-menu-item"
+              onClick={() => {
+                setAddMenuOpen(false);
+                handlePickFolder();
+              }}
+            >
+              Open folder…
+            </button>
+            {filteredRecents.length > 0 && (
+              <>
+                <div className="project-rail-context-menu-divider" />
+                <div className="project-rail-context-menu-heading">Recent projects</div>
+                {filteredRecents.map((recent) => (
+                  <button
+                    key={recent.path}
+                    type="button"
+                    className="project-rail-context-menu-item project-rail-context-menu-item-recent"
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      addProjectByPath(recent.path);
+                    }}
+                    title={recent.path}
+                  >
+                    <span className="project-rail-context-menu-item-name">{recent.name || recent.path}</span>
+                    <span className="project-rail-context-menu-item-path">{recent.path}</span>
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+        </FloatingPortal>
+      )}
 
       {menu && (
         <FloatingPortal>
