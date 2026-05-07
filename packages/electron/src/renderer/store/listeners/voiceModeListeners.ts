@@ -269,8 +269,16 @@ function formatPromptForVoice(prompt: { promptType: string; promptId: string; da
   }
 
   if (prompt.promptType === 'git_commit_proposal_request') {
-    const message = prompt.data?.commitMessage || '';
-    return `The coding agent wants to commit changes. Commit message: "${message}". Say "approve" to commit or "reject" to cancel.`;
+    // Multi-line commit messages are too long for voice -- read the title only.
+    // Body paragraphs (after the first blank line) belong in the widget, not aloud.
+    const fullMessage: string = prompt.data?.commitMessage || '';
+    const titleLine = fullMessage.split('\n')[0]?.trim() || '';
+    const files = Array.isArray(prompt.data?.filesToStage) ? prompt.data.filesToStage : [];
+    const fileCount = files.length;
+    const fileSummary = fileCount === 0
+      ? ''
+      : ` Across ${fileCount} file${fileCount === 1 ? '' : 's'}.`;
+    return `Commit proposal:${fileSummary} Commit message: "${titleLine}". Say "approve" to commit or "reject" to cancel.`;
   }
 
   return 'The coding agent needs your input.';
@@ -403,6 +411,73 @@ export function initVoiceModeListeners(): () => void {
       if (!isVoiceActive()) return;
       const cb = getVoiceSubmitPromptCallback();
       if (cb) cb(payload);
+    })
+  );
+
+  // =========================================================================
+  // Propose Commit (voice agent triggered the "Commit with AI" feature)
+  // =========================================================================
+  // Mirrors handleSmartCommit() in GitOperationsPanel.tsx exactly: pre-fetch
+  // the file list via git:get-commit-context, build the message that
+  // CommitRequestCard recognizes (so the "Requesting commit proposal"
+  // widget appears in the transcript), and dispatch via ai:sendMessage so
+  // it lands in the session as a regular user message. The coding agent
+  // then invokes developer_git_commit_proposal, and the resulting widget +
+  // git_commit_proposal_request interactive prompt flow back through the
+  // existing forwarding pipeline.
+  cleanups.push(
+    window.electronAPI.on('voice-mode:propose-commit', async (payload: {
+      sessionId: string;
+      workspacePath: string | null;
+    }) => {
+      if (!isVoiceActive()) return;
+      const { sessionId, workspacePath } = payload;
+      if (!sessionId || !workspacePath) {
+        console.warn('[voiceModeListeners] propose-commit missing sessionId or workspacePath');
+        return;
+      }
+
+      try {
+        const commitContext = await window.electronAPI.invoke(
+          'git:get-commit-context',
+          workspacePath,
+          sessionId,
+          undefined,
+        ) as {
+          success: boolean;
+          files: Array<{ path: string; status: 'added' | 'modified' | 'deleted' }>;
+          scenario: 'single' | 'workstream';
+          error?: string;
+        };
+
+        let message = 'Use the developer_git_commit_proposal tool to create a commit.';
+
+        if (commitContext.success && commitContext.files.length > 0) {
+          const fileList = commitContext.files
+            .map(f => `- ${f.path} (${f.status})`)
+            .join('\n');
+          message += `\n\nHere are the files edited in this session that have uncommitted changes:\n${fileList}`;
+          message += '\n\nCall developer_git_commit_proposal immediately with these files.';
+          message += '\nDo NOT call get_session_edited_files, get_workstream_edited_files, or git diff -- the data is already provided above.';
+        } else if (commitContext.success && commitContext.files.length === 0) {
+          message += '\n\nNo session-edited files have uncommitted changes. Check git status to see if there are any other uncommitted changes to commit.';
+        } else {
+          message += '\n\nFirst call get_session_edited_files to find all files edited, ' +
+            'then cross-reference with git status to include all session-edited files that have uncommitted changes.';
+        }
+
+        const docContext = {
+          filePath: undefined,
+          content: undefined,
+          fileType: undefined,
+          attachments: undefined,
+          mode: 'agent',
+          inputType: 'user' as const,
+        };
+        await window.electronAPI.invoke('ai:sendMessage', message, docContext, sessionId, workspacePath);
+      } catch (error) {
+        console.error('[voiceModeListeners] propose-commit failed:', error);
+      }
     })
   );
 
@@ -662,6 +737,70 @@ export function initVoiceModeListeners(): () => void {
           response = { ...response, answers: rebuiltAnswers };
           // console.log('[voiceModeListeners] Rebuilt voice answer with question key:', questions[0].question);
         }
+      }
+
+      // GitCommitProposal: the widget click flow invokes git:commit and then
+      // sends messages:respond-to-prompt with { action: 'committed' | 'cancelled' }.
+      // The voice agent's "approve"/"reject" answer arrives here as
+      // { approved: true|false } -- mirror the widget flow so the voice path
+      // produces the same end state.
+      if (payload.promptType === 'git_commit_proposal_request') {
+        const approved = response?.approved === true;
+        const pendingPrompts = store.get(sessionPendingPromptsAtom(payload.sessionId));
+        const prompt = pendingPrompts.find(p => p.promptId === payload.promptId);
+        const data = prompt?.data || {};
+        const filesToStage: Array<string | { path: string }> = Array.isArray(data.filesToStage)
+          ? data.filesToStage
+          : [];
+        const filePaths = filesToStage.map(f => (typeof f === 'string' ? f : f.path));
+        const commitMessage: string = data.commitMessage || '';
+        const commitWorkspacePath: string =
+          data.workspacePath || store.get(voiceWorkspacePathAtom) || '';
+
+        if (approved && commitWorkspacePath && filePaths.length > 0 && commitMessage) {
+          // Run the actual commit, then forward the result so the durable
+          // prompt is resolved with the same shape the widget produces.
+          window.electronAPI
+            .invoke('git:commit', commitWorkspacePath, commitMessage, filePaths)
+            .then((result: any) => {
+              window.electronAPI.invoke('messages:respond-to-prompt', {
+                sessionId: payload.sessionId,
+                promptId: payload.promptId,
+                promptType: 'git_commit_proposal_request',
+                response: {
+                  action: result?.success ? 'committed' : 'cancelled',
+                  commitHash: result?.commitHash,
+                  commitDate: result?.commitDate,
+                  error: result?.error,
+                  filesCommitted: result?.success ? filePaths : undefined,
+                  commitMessage: result?.success ? commitMessage : undefined,
+                },
+                respondedBy: 'desktop',
+              });
+            })
+            .catch((error: unknown) => {
+              window.electronAPI.invoke('messages:respond-to-prompt', {
+                sessionId: payload.sessionId,
+                promptId: payload.promptId,
+                promptType: 'git_commit_proposal_request',
+                response: {
+                  action: 'cancelled',
+                  error: error instanceof Error ? error.message : String(error),
+                },
+                respondedBy: 'desktop',
+              });
+            });
+        } else {
+          // Reject path -- or missing data, can't safely commit. Cancel cleanly.
+          window.electronAPI.invoke('messages:respond-to-prompt', {
+            sessionId: payload.sessionId,
+            promptId: payload.promptId,
+            promptType: 'git_commit_proposal_request',
+            response: { action: 'cancelled' },
+            respondedBy: 'desktop',
+          });
+        }
+        return;
       }
 
       // Use the respondToPromptAtom to persist and resolve the prompt

@@ -193,12 +193,17 @@ export const sessionPromptAdditionsAtom = atomFamily((_sessionId: string) =>
 
 /**
  * Pending interactive prompt from the database.
- * Represents either a permission_request or ask_user_question_request.
+ * Represents one of: permission_request, ask_user_question_request,
+ * exit_plan_mode_request, or git_commit_proposal_request.
  */
 export interface PendingPrompt {
   id: string;
   sessionId: string;
-  promptType: 'permission_request' | 'ask_user_question_request';
+  promptType:
+    | 'permission_request'
+    | 'ask_user_question_request'
+    | 'exit_plan_mode_request'
+    | 'git_commit_proposal_request';
   promptId: string;  // requestId or questionId
   data: any;         // The full prompt content
   createdAt: number;
