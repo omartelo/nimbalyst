@@ -35,6 +35,7 @@ import {
   globalSessionActivityAtom,
   projectActivitySummaryAtom,
 } from '../store/atoms/sessionActivity';
+import { generateWorkspaceAccentColor } from './WorkspaceSummaryHeader';
 import './ProjectRail.css';
 
 const REVEAL_LABEL = (() => {
@@ -96,6 +97,11 @@ function ProjectRailIcon({
 
   const className = isActive ? 'project-rail-item is-active' : 'project-rail-item';
 
+  // Per-project accent color, derived deterministically from the workspace
+  // path so the rail icon matches the colored bar shown in the workspace
+  // summary header (and in SessionHistory entries) for the same project.
+  const accentColor = useMemo(() => generateWorkspaceAccentColor(project.path), [project.path]);
+
   // Inactive projects show a badge when something needs attention. Active
   // projects already have the user's eyes on them so we suppress the
   // badge to keep the rail quiet.
@@ -111,6 +117,7 @@ function ProjectRailIcon({
       onContextMenu={handleContextMenu}
       data-testid="project-rail-item"
       data-project-path={project.path}
+      style={{ ['--rail-item-accent' as any]: accentColor }}
     >
       <button
         type="button"
