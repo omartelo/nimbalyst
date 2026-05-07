@@ -458,13 +458,13 @@ export const VoiceModePanel: React.FC<VoiceModePanelProps> = ({
                   min="5000"
                   max="30000"
                   step="1000"
-                  value={listenWindowMs ?? 10000}
+                  value={listenWindowMs ?? 15000}
                   onChange={(e) => handleSettingChange({ listenWindowMs: parseInt(e.target.value) })}
                   className="flex-1"
                 />
                 <span className="text-xs text-[var(--nim-text-muted)]">30s</span>
                 <span className="text-xs text-[var(--nim-text)] min-w-[36px]">
-                  {Math.round((listenWindowMs ?? 10000) / 1000)}s
+                  {Math.round((listenWindowMs ?? 15000) / 1000)}s
                 </span>
               </div>
             </div>

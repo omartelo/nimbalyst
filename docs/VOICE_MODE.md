@@ -147,7 +147,7 @@ Voice mode uses a three-state listening model managed by `voiceModeListeners.ts`
 ```
 
 **Timer management:**
-- `startListenWindowTimer()` starts a countdown (default 10s, configurable via `listenWindowMs`)
+- `startListenWindowTimer()` starts a countdown (default 15s, configurable via `listenWindowMs`)
 - Timer is paused during speech (speech_started clears timer)
 - Timer restarts after speech ends (speech_stopped) or after assistant finishes responding (token-usage)
 - Timer is cleared while assistant is speaking (audio chunks arriving)
@@ -310,7 +310,7 @@ Voice mode settings are stored in `nimbalyst-settings` electron-store (not `ai-s
 | `voiceAgentPrompt` | `SystemPromptConfig` | `{}` | Custom prepend/append for voice agent system prompt |
 | `codingAgentPrompt` | `SystemPromptConfig` | `{}` | Custom prepend/append for coding agent when in voice mode |
 | `submitDelayMs` | `number` | `3000` | Delay before auto-submitting voice commands (0 = immediate) |
-| `listenWindowMs` | `number` | `10000` | How long to keep listening after speech ends before sleeping |
+| `listenWindowMs` | `number` | `15000` | How long to keep listening after speech ends before sleeping |
 
 ## Callback Registration Pattern
 

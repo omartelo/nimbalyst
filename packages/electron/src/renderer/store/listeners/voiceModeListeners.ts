@@ -31,6 +31,7 @@ import {
   getVoiceAgentTaskCompleteCallback,
   getVoiceStoppedCallback,
   getVoiceResponseDoneCallback,
+  getVoiceAudioActiveQuery,
   type VoiceTranscriptEntry,
   type VoiceTokenUsage,
 } from '../atoms/voiceModeState';
@@ -62,7 +63,7 @@ export function onLinkedSessionChanged(callback: ((newSessionId: string) => void
 let _listenWindowTimer: ReturnType<typeof setTimeout> | null = null;
 
 function getListenWindowMs(): number {
-  return store.get(voiceModeSettingsAtom).listenWindowMs ?? 10000;
+  return store.get(voiceModeSettingsAtom).listenWindowMs ?? 15000;
 }
 
 function clearListenWindowTimer(): void {
@@ -84,6 +85,48 @@ function startListenWindowTimer(): void {
       sleepVoiceListening();
     }
   }, ms);
+}
+
+// =========================================================================
+// Post-Turn Listen Window
+// =========================================================================
+// When the assistant finishes a turn (token-usage), we want to start the
+// 15s listen window from the moment the user *stops hearing* the assistant,
+// not from when the server finished generating audio chunks. Long responses
+// stream chunks fast (~3s) but play back slowly (~30s), so starting the
+// timer at server-done used to expire it mid-playback and gate the mic.
+
+let _pendingPostTurnTimer = false;
+let _postTurnFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Wake from sleep if needed, start the 15s listen timer, fire ready cue. */
+function startListenWindowForPostTurn(): void {
+  const wokeFromSleep = store.get(voiceListenStateAtom) === 'sleeping';
+  if (wokeFromSleep) {
+    wakeVoiceListening(false);
+  }
+  startListenWindowTimer();
+  const responseDoneCb = getVoiceResponseDoneCallback();
+  if (responseDoneCb) responseDoneCb(wokeFromSleep);
+}
+
+function clearPostTurnPending(): void {
+  _pendingPostTurnTimer = false;
+  if (_postTurnFallbackTimer) {
+    clearTimeout(_postTurnFallbackTimer);
+    _postTurnFallbackTimer = null;
+  }
+}
+
+/**
+ * Called by AudioPlayback (via VoiceModeButton) when the assistant's audio
+ * queue has fully drained -- i.e. the user has actually finished hearing the
+ * agent. If we deferred the post-turn listen window earlier, fire it now.
+ */
+export function notifyVoiceAudioPlaybackDrained(): void {
+  if (!_pendingPostTurnTimer) return;
+  clearPostTurnPending();
+  startListenWindowForPostTurn();
 }
 
 /**
@@ -194,6 +237,7 @@ async function updateSessionMetadata(tokenUsage?: VoiceTokenUsage | null): Promi
  */
 function resetVoiceAtoms(): void {
   clearListenWindowTimer();
+  clearPostTurnPending();
   store.set(voiceListenStateAtom, 'off');
   store.set(voiceActiveSessionIdAtom, null);
   store.set(voiceTranscriptEntriesAtom, []);
@@ -316,6 +360,12 @@ export function initVoiceModeListeners(): () => void {
       // reset would still expire mid-speech. Clear it instead.
       // console.log('[voiceModeListeners] speech_started -> pausing listen window timer');
       clearListenWindowTimer();
+
+      // Discard any pending post-turn timer: the user is now driving the
+      // turn. If we left it pending, the AudioPlayback.stop() below would
+      // synthesize a drain via onended-after-stop and we'd start a 15s
+      // window mid-utterance.
+      clearPostTurnPending();
 
       // Stop audio playback (user is interrupting the assistant)
       const cb = getVoiceInterruptCallback();
@@ -493,13 +543,30 @@ export function initVoiceModeListeners(): () => void {
         pendingAssistantEntry = null;
       }
 
-      // Assistant finished responding. Start the idle countdown from NOW.
-      // console.log('[voiceModeListeners] token-usage -> starting listen window timer');
-      startListenWindowTimer();
+      // Assistant finished a turn server-side. Decide when to start the 15s
+      // listen window: if audio is still playing in the user's speakers,
+      // wait for the playback queue to drain. Otherwise (function-call-only
+      // turn or text-only response), start it now.
+      const audioActiveQuery = getVoiceAudioActiveQuery();
+      const audioStillPlaying = audioActiveQuery ? audioActiveQuery() : false;
 
-      // Notify VoiceModeButton to unmute mic (assistant done speaking)
-      const responseDoneCb = getVoiceResponseDoneCallback();
-      if (responseDoneCb) responseDoneCb();
+      if (audioStillPlaying) {
+        // Defer until AudioPlayback fires onDrained (then notifyVoiceAudioPlaybackDrained).
+        _pendingPostTurnTimer = true;
+        // Fallback: if the drain notification never arrives (e.g. AudioPlayback
+        // is destroyed or the callback wiring breaks), start the timer after a
+        // generous max-playback duration so the mic doesn't stay open forever.
+        if (_postTurnFallbackTimer) clearTimeout(_postTurnFallbackTimer);
+        _postTurnFallbackTimer = setTimeout(() => {
+          if (!_pendingPostTurnTimer) return;
+          clearPostTurnPending();
+          startListenWindowForPostTurn();
+        }, 60000);
+      } else {
+        // No audio playing -- start the timer immediately.
+        clearPostTurnPending();
+        startListenWindowForPostTurn();
+      }
     })
   );
 
