@@ -265,6 +265,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     outputPath: string;
     pageSize?: 'A4' | 'Letter' | 'Legal';
     landscape?: boolean;
+    generateDocumentOutline?: boolean;
+    generateTaggedPDF?: boolean;
     margins?: { top?: number; bottom?: number; left?: number; right?: number };
   }) => ipcRenderer.invoke('export:htmlToPdf', options) as Promise<{ success: boolean; error?: string }>,
   exportSessionToHtml: (options: { sessionId: string }) =>

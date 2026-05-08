@@ -100,6 +100,18 @@ interface ElectronAPI {
   saveFile: (content: string, filePath: string, lastKnownContent?: string) => Promise<{ success: boolean; filePath: string; conflict?: boolean; diskContent?: string } | null>;
   saveFileAs: (content: string) => Promise<{ success: boolean; filePath: string } | null>;
   showErrorDialog: (title: string, message: string) => Promise<void>;
+  showSaveDialogPdf: (options: { defaultPath?: string }) => Promise<string | null>;
+  exportHtmlToPdf: (options: {
+    html: string;
+    outputPath: string;
+    pageSize?: 'A4' | 'Letter' | 'Legal';
+    landscape?: boolean;
+    generateDocumentOutline?: boolean;
+    generateTaggedPDF?: boolean;
+    margins?: { top?: number; bottom?: number; left?: number; right?: number };
+  }) => Promise<{ success: boolean; error?: string }>;
+  exportSessionToHtml: (options: { sessionId: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+  exportSessionToClipboard: (options: { sessionId: string }) => Promise<{ success: boolean; error?: string }>;
 
   // Share operations
   shareSessionAsLink: (options: { sessionId: string; expirationDays?: number }) => Promise<{ success: boolean; url?: string; shareId?: string; isUpdate?: boolean; encryptionKey?: string; error?: string }>;
