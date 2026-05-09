@@ -13,7 +13,11 @@ import { ElectronDocumentService, setupDocumentServiceHandlers } from '../servic
 import { ElectronFileSystemService } from '../services/ElectronFileSystemService';
 import { isWorktreePath, resolveProjectPath } from '../utils/workspaceDetection';
 import { getPreloadPath } from '../utils/appPaths';
-import { setFileSystemService, clearFileSystemService } from '@nimbalyst/runtime';
+import {
+  setFileSystemService,
+  clearFileSystemService,
+  setFileSystemServiceFor,
+} from '@nimbalyst/runtime';
 import { navigationHistoryService } from '../services/NavigationHistoryService';
 import { AnalyticsService } from '../services/analytics/AnalyticsService';
 import { FeatureTrackingService } from '../services/analytics/FeatureTrackingService';
@@ -294,6 +298,11 @@ export function createWindow(
                 fileSystemServices.set(workspacePath, fileSystemService);
                 // Set the file system service globally for the runtime
                 setFileSystemService(fileSystemService);
+                // Also register it in the per-path runtime registry so AI
+                // tool dispatch in inactive rail projects can resolve the
+                // correct workspace's service without falling back to the
+                // global (see fileTools.resolveFileSystemServiceForCall).
+                setFileSystemServiceFor(workspacePath, fileSystemService);
                 // console.log('[MAIN] Created FileSystemService for workspace:', workspacePath);
             }
 

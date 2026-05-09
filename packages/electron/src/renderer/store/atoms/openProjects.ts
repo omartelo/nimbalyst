@@ -16,7 +16,8 @@
 import { atom, type createStore } from 'jotai';
 import { store } from '@nimbalyst/runtime/store';
 import { clearWorkspaceActivityAtom } from './sessionActivity';
-import { activeSessionIdAtom } from './sessions';
+import { activeSessionIdAtom, selectedWorkstreamAtom } from './sessions';
+import { workstreamActiveChildAtom } from './workstreamState';
 
 type JotaiStore = ReturnType<typeof createStore>;
 
@@ -230,18 +231,32 @@ export async function initOpenProjects(): Promise<void> {
 
 /**
  * Attach a subscriber that keeps cross-workspace globals coherent when
- * `activeWorkspacePathAtom` flips. Currently clears `activeSessionIdAtom`
- * so a rail switch cannot leak a session id from the previous workspace
- * into the new one — the new workspace's `selectedWorkstreamAtom` (if it
- * has a selection) repopulates the global via AgentMode's mount effect.
+ * `activeWorkspacePathAtom` flips. Synchronously rewrites
+ * `activeSessionIdAtom` to the new workspace's selection — leaking the
+ * previous workspace's session id is avoided AND the brief null window
+ * between the subscriber firing and AgentMode's mount effect is closed.
+ *
+ * Resolution order matches AgentMode's own derivation
+ * (`AgentMode.tsx:151-158`): activeChildId of the selected workstream
+ * if any, otherwise the selection's own id, otherwise null. AgentMode
+ * still re-asserts the same value on mount; the writes converge.
  *
  * Exported as a stand-alone unit so jotai-only tests can attach it to a
- * `createStore()` instance and assert the clearing behavior without
- * needing the full `initOpenProjects` IPC bootstrap.
+ * `createStore()` instance and assert the behavior without needing the
+ * full `initOpenProjects` IPC bootstrap.
  */
 export function attachWorkspaceSwitchCleanup(jotaiStore: JotaiStore): () => void {
   return jotaiStore.sub(activeWorkspacePathAtom, () => {
-    jotaiStore.set(activeSessionIdAtom, null);
+    const newPath = jotaiStore.get(activeWorkspacePathAtom);
+    if (!newPath) {
+      jotaiStore.set(activeSessionIdAtom, null);
+      return;
+    }
+    const selection = jotaiStore.get(selectedWorkstreamAtom(newPath));
+    const activeChildId = selection
+      ? jotaiStore.get(workstreamActiveChildAtom(selection.id))
+      : null;
+    jotaiStore.set(activeSessionIdAtom, activeChildId || selection?.id || null);
   });
 }
 

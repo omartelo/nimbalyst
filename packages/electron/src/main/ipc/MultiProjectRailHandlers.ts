@@ -34,7 +34,12 @@ import { addNimAssetRoot } from '../protocols/nimAssetProtocol';
 import { getMcpConfigService } from '../index';
 import { addToRecentItems, getWorkspaceNavigationHistory } from '../utils/store';
 import { navigationHistoryService } from '../services/NavigationHistoryService';
-import { setFileSystemService, clearFileSystemService } from '@nimbalyst/runtime';
+import {
+  setFileSystemService,
+  clearFileSystemService,
+  setFileSystemServiceFor,
+  clearFileSystemServiceFor,
+} from '@nimbalyst/runtime';
 import { logger } from '../utils/logger';
 
 // Re-uses the same Maps that WindowManager populates. WindowManager exports
@@ -82,6 +87,13 @@ function ensureServicesForPath(window: BrowserWindow, workspacePath: string): vo
     if (!fileSystemServices.has(workspacePath)) {
         const fileSystemService = new ElectronFileSystemService(workspacePath);
         fileSystemServices.set(workspacePath, fileSystemService);
+        // Per-path runtime registry mirrors the electron-side map so AI
+        // tool dispatch (fileTools.searchFiles / listFiles / readFile)
+        // running inside a session whose workspace is currently INACTIVE
+        // in the rail still resolves to the right service. Without this,
+        // the runtime-global singleton (set on rail switch to the active
+        // workspace) would silently route those calls to the wrong fs.
+        setFileSystemServiceFor(workspacePath, fileSystemService);
     }
 
     // Restore navigation history (no-op if already restored for this window).
@@ -170,6 +182,9 @@ export function registerMultiProjectRailHandlers(): void {
             if (fsService) {
                 fsService.destroy();
                 fileSystemServices.delete(workspacePath);
+                // Drop the runtime-side per-path registration too so a
+                // future AI tool call cannot resolve a destroyed service.
+                clearFileSystemServiceFor(workspacePath);
             }
 
             try {

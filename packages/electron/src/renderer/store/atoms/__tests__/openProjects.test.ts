@@ -10,7 +10,7 @@ import {
   attachWorkspaceSwitchCleanup,
   type OpenProject,
 } from '../openProjects';
-import { activeSessionIdAtom } from '../sessions';
+import { activeSessionIdAtom, selectedWorkstreamAtom } from '../sessions';
 
 const MAX_OPEN_PROJECTS = 8;
 
@@ -170,10 +170,11 @@ describe('openProjects atoms', () => {
     // `activeSessionIdAtom` pointing at the previous workspace's session.
     // The renderer then sent that stale id to `ai:sendMessage` against
     // the new workspace's path and SessionManager rejected it as
-    // "Session ... not found". The cleanup subscriber forces the global
-    // session id to null on every flip; AgentMode repopulates it from
-    // the new workspace's selection on mount.
-    it('clears activeSessionIdAtom whenever activeWorkspacePathAtom flips', () => {
+    // "Session ... not found". The subscriber synchronously rewrites
+    // the global atom to the new workspace's selection (or null if no
+    // selection), which closes the transient-null window AgentMode's
+    // mount effect would otherwise leave open.
+    it('clears activeSessionIdAtom when flipping to a workspace with no selection', () => {
       const unsub = attachWorkspaceSwitchCleanup(jotaiStore);
 
       jotaiStore.set(activeWorkspacePathAtom, '/ws/a');
@@ -198,7 +199,30 @@ describe('openProjects atoms', () => {
       unsub();
     });
 
-    it('stops clearing once the returned unsubscribe is invoked', () => {
+    it('repopulates activeSessionIdAtom from the new workspace selection synchronously', () => {
+      // Pre-seed /ws/b's selection BEFORE attaching so the subscriber sees
+      // a non-empty selectedWorkstreamAtom on the flip.
+      jotaiStore.set(selectedWorkstreamAtom('/ws/b'), { type: 'session', id: 'session-b-root' });
+
+      const unsub = attachWorkspaceSwitchCleanup(jotaiStore);
+      jotaiStore.set(activeWorkspacePathAtom, '/ws/a');
+      jotaiStore.set(activeSessionIdAtom, 'session-from-a');
+
+      jotaiStore.set(activeWorkspacePathAtom, '/ws/b');
+      // Synchronous after the subscriber fires — no React or AgentMode
+      // effect required.
+      expect(jotaiStore.get(activeSessionIdAtom)).toBe('session-b-root');
+
+      unsub();
+    });
+
+    // Note: the active-child priority branch
+    // (`workstreamActiveChildAtom(selection.id) || selection.id`) is not
+    // unit-tested here because writing to the workstream state requires
+    // the IPC-bootstrapped `initWorkstreamState`. The branch is exercised
+    // via AgentMode's existing integration coverage.
+
+    it('stops updating once the returned unsubscribe is invoked', () => {
       const unsub = attachWorkspaceSwitchCleanup(jotaiStore);
       jotaiStore.set(activeWorkspacePathAtom, '/ws/a');
       jotaiStore.set(activeSessionIdAtom, 'session-from-a');

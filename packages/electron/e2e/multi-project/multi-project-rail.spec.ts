@@ -126,6 +126,40 @@ test.describe('Multi-Project Rail', () => {
     await expect(secondItem).not.toHaveClass(/active/);
   });
 
+  test('rail click updates workspace context in-process (no reload)', async () => {
+    // Regression for the in-memory rail-switch path. The earlier session
+    // leak bug only surfaced when the same renderer process flipped the
+    // active workspace; reload-based assertions miss it because the boot
+    // cycle re-reads workspace state from scratch. Click a rail icon and
+    // verify the summary header + sidebar path reflect the newly active
+    // workspace without `page.reload()`.
+    const rail = page.locator('[data-testid="project-rail"]');
+    const items = rail.locator('[data-testid="project-rail-item"]');
+    await expect(items).toHaveCount(2);
+
+    const firstPath = await items.first().getAttribute('data-project-path');
+    const secondPath = await items.nth(1).getAttribute('data-project-path');
+    expect(firstPath).toBeTruthy();
+    expect(secondPath).toBeTruthy();
+    expect(firstPath).not.toBe(secondPath);
+
+    // Click the first rail icon and confirm the summary header carries
+    // the matching path.
+    await items.first().click();
+    await expect(page.locator('.workspace-summary-header-path')).toContainText(firstPath!);
+
+    // Click the second rail icon WITHOUT a reload. The summary header
+    // and sidebar must follow the new active workspace.
+    await items.nth(1).click();
+    await expect(page.locator('.workspace-summary-header-path')).toContainText(secondPath!);
+
+    // The agent panel should reflect the new workspace's empty state
+    // (neither test workspace was seeded with a session, so both render
+    // the empty placeholder). The test would have failed pre-fix because
+    // the previous workspace's transcript was still visible.
+    await expect(page.locator('.agent-mode-empty')).toBeVisible({ timeout: TEST_TIMEOUTS.SIDEBAR_LOAD });
+  });
+
   test('closing the active project promotes the next entry', async () => {
     const rail = page.locator('[data-testid="project-rail"]');
     const items = rail.locator('[data-testid="project-rail-item"]');
