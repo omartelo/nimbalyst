@@ -7,6 +7,8 @@ import { app } from 'electron';
 import { getWorkspaceState, updateWorkspaceState, getTheme, getThemeSync, isCompletionSoundEnabled, setCompletionSoundEnabled, getCompletionSoundType, setCompletionSoundType, CompletionSoundType, getReleaseChannel, setReleaseChannel, ReleaseChannel, getRecentItems, getDefaultAIModel, setDefaultAIModel, getDefaultEffortLevel, setDefaultEffortLevel, isAnalyticsEnabled, setAnalyticsEnabled, getSessionSyncConfig, setSessionSyncConfig, SessionSyncConfig, isExtensionDevToolsEnabled, setExtensionDevToolsEnabled, getAppSetting, setAppSetting, getAlphaFeatures, setAlphaFeatures, getBetaFeatures, setBetaFeatures, getEnableAllBetaFeatures, setEnableAllBetaFeatures, getDeveloperFeatures, setDeveloperFeatures, isDeveloperFeatureAvailable, isShowTrayIcon, getDebugFlags, setDebugFlags, type DebugFlags } from '../utils/store';
 import { getEnhancedPath } from '../services/CLIManager';
 import { logger } from '../utils/logger';
+import { SessionNamingService } from '../services/SessionNamingService';
+import { setPreferredAgentLanguage } from '../utils/store';
 import { SoundNotificationService } from '../services/SoundNotificationService';
 import { autoUpdaterService } from '../services/autoUpdater';
 import type { OnboardingState } from '../utils/store';
@@ -76,6 +78,18 @@ export function registerSettingsHandlers() {
     safeHandle('spellcheck:set-enabled', (_event, enabled: boolean) => {
         session.defaultSession.setSpellCheckerEnabled(enabled);
         setAppSetting('spellcheckEnabled', enabled);
+    });
+
+    // Preferred agent language. Persists to the electron-store and pushes
+    // the new value into the runtime so providers pick it up on the next turn.
+    safeHandle('preferred-agent-language:set', (_event, language: unknown) => {
+        const value = typeof language === 'string' ? language : undefined;
+        setPreferredAgentLanguage(value);
+        SessionNamingService.getInstance().setLanguage(value);
+    });
+
+    safeHandle('preferred-agent-language:get', () => {
+        return getAppSetting<string>('preferredAgentLanguage') ?? '';
     });
 
     // Get the enhanced PATH that Nimbalyst uses for spawning processes

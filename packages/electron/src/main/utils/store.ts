@@ -140,6 +140,11 @@ interface AppStoreSchema {
     autoCommitAudio?: boolean; // Auto-commit audio on speech pause (VAD)
     showTranscription?: boolean; // Show live transcription in UI
   };
+  // Preferred language for the agent (currently used for AI-generated session
+  // names). BCP-47 code or common name, e.g. "ja", "Japanese", "en", "fr".
+  // Empty/undefined means no preference -- the agent picks based on the
+  // conversation language.
+  preferredAgentLanguage?: string;
   // Walkthrough guide system state
   walkthroughs?: WalkthroughState;
   // First-open tracking for editor types (for walkthrough triggers)
@@ -1880,6 +1885,34 @@ export function getAppSetting<T>(key: string): T | undefined {
  */
 export function setAppSetting<T>(key: string, value: T): void {
   getAppStore().set(key as keyof AppStoreSchema, value as any);
+}
+
+// Preferred Agent Language
+// Preferred language for the agent. Currently used to steer the auto-generated
+// session name. Empty/undefined means no preference -- the agent picks based
+// on the conversation language.
+
+/**
+ * Get the preferred agent language.
+ * Returns undefined when no preference is set.
+ */
+export function getPreferredAgentLanguage(): string | undefined {
+  const value = getAppStore().get('preferredAgentLanguage');
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Set the preferred agent language.
+ * Pass undefined or empty string to clear the preference.
+ */
+export function setPreferredAgentLanguage(language: string | undefined): void {
+  if (language && language.trim().length > 0) {
+    getAppStore().set('preferredAgentLanguage', language.trim());
+  } else {
+    getAppStore().delete('preferredAgentLanguage');
+  }
 }
 
 // V8 Heap Memory Limit

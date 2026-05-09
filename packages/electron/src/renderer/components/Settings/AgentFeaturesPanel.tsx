@@ -44,6 +44,7 @@ export function AgentFeaturesPanel() {
   const [, updateAIDebugSettings] = useAtom(setAIDebugSettingsAtom);
   const { showToolCalls, aiDebugLogging, showPromptAdditions } = aiDebugSettings;
   const [workflowSettingsLoading, setWorkflowSettingsLoading] = useState(false);
+  const [preferredAgentLanguage, setPreferredAgentLanguage] = useState<string>('');
   const [workflowSourceSettings, setWorkflowSourceSettings] = useState<WorkflowSourceSettings>({
     workspaceClaudeCompatibilityEnabled: false,
     includeProjectClaudeSources: false,
@@ -90,6 +91,27 @@ export function AgentFeaturesPanel() {
     };
 
     loadAgentWorkflowSettings();
+  }, []);
+
+  useEffect(() => {
+    const loadPreferredAgentLanguage = async () => {
+      try {
+        const language = await window.electronAPI.invoke('preferred-agent-language:get');
+        setPreferredAgentLanguage(typeof language === 'string' ? language : '');
+      } catch (err) {
+        console.error('Failed to load preferred agent language:', err);
+      }
+    };
+    loadPreferredAgentLanguage();
+  }, []);
+
+  const handlePreferredAgentLanguageChange = useCallback(async (value: string) => {
+    setPreferredAgentLanguage(value);
+    try {
+      await window.electronAPI.invoke('preferred-agent-language:set', value);
+    } catch (err) {
+      console.error('Failed to save preferred agent language:', err);
+    }
   }, []);
 
   const handleWorkflowSourceToggle = useCallback(async (
@@ -143,6 +165,25 @@ export function AgentFeaturesPanel() {
           name="Auto-approve Commits"
           description="Automatically approve when Claude proposes git commits."
         />
+
+        <div className="agent-preferred-language flex items-start justify-between gap-4 py-3">
+          <div className="flex-1 min-w-0">
+            <div className="text-sm font-medium text-[var(--nim-text)] leading-tight">
+              Preferred Agent Language
+            </div>
+            <div className="text-xs text-[var(--nim-text-muted)] leading-snug mt-0.5">
+              Preferred language for AI-generated session names (e.g. "Japanese", "ja", "Spanish"). Leave blank to let the agent pick based on the conversation.
+            </div>
+          </div>
+          <input
+            type="text"
+            value={preferredAgentLanguage}
+            onChange={(e) => handlePreferredAgentLanguageChange(e.target.value)}
+            placeholder="e.g. ja"
+            className="w-40 py-1.5 px-3 rounded-md text-sm bg-[var(--nim-bg-secondary)] border border-[var(--nim-border)] text-[var(--nim-text)] outline-none focus:border-[var(--nim-primary)]"
+            data-testid="preferred-agent-language-input"
+          />
+        </div>
       </div>
 
       <div className="provider-panel-section">
