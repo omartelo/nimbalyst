@@ -1406,9 +1406,13 @@ app.whenReady().then(async () => {
       });
     }
 
-    // Inject additional directories loader
-    // This allows Claude to access SDK docs when working on extension projects
+    // Inject additional directories loader. Adds the parent project root and
+    // sibling worktrees so agents can read shared configs, traverse the .git
+    // common dir from a worktree, and (for Codex) escape its workspace-write
+    // sandbox when an orchestrator session needs to edit sibling worktrees.
+    // Issue #37 problem 1.
     ClaudeCodeProvider.setAdditionalDirectoriesLoader(getAdditionalDirectoriesForWorkspace);
+    OpenAICodexProvider.setAdditionalDirectoriesLoader(getAdditionalDirectoriesForWorkspace);
 
     // Wire shared permission infrastructure for all agent providers.
     // Both Claude Code and OpenAI Codex use the same pattern storage,
