@@ -74,6 +74,7 @@ import {
   getFileExtensionForAnalytics,
 } from './aiServiceUtils';
 import { disableParentNotificationsAfterDirectTakeover } from './childSessionTakeover';
+import { installScopedProviderListener } from './providerListenerRegistry';
 import type Store from 'electron-store';
 import type { AIService } from './AIService';
 import type { HooklessAgentFileWatcher } from './HooklessAgentFileWatcher';
@@ -251,17 +252,7 @@ export class MessageStreamingHandler {
     event: string,
     listener: (...args: any[]) => void,
   ): void {
-    let listeners = this.providerListeners.get(provider);
-    if (!listeners) {
-      listeners = new Map<string, (...args: any[]) => void>();
-      this.providerListeners.set(provider, listeners);
-    }
-    const previous = listeners.get(event);
-    if (previous) {
-      provider.off(event, previous);
-    }
-    listeners.set(event, listener);
-    provider.on(event, listener);
+    installScopedProviderListener(this.providerListeners, provider, event, listener);
   }
 
   handle: SendMessageHandler = async (
