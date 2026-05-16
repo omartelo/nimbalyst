@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 <!-- Removed features go here -->
 
+## [0.60.4] - 2026-05-16
+
+
+### Changed
+- Tracker schema watcher test rewritten to use mocked chokidar callbacks instead of real filesystem timing and polling, preserving coverage of add/change/unlink while removing the flake. The hot-reload integration test timeout is also raised for slower CI runners so the job stops failing on the runner side.
+
+### Fixed
+- Agent transcript regressions from v0.60.3's flat-list switch. `content-visibility: auto` skipped rows used stale intrinsic-size placeholders that broke click-and-drag selection (the cursor landed mid-transcript), and short transcripts floated bubbles in the middle of the viewport because flex auto-margins killed `align-items: stretch`. Chromium now uses plain DOM rendering for every message and lazy-mounts only the heavy widgets (diff views, custom tool cards) via IntersectionObserver with known placeholder heights; once a heavy widget mounts it stays mounted, so DOM hit-testing matches what the user sees and selection works. New `LazyMount` component wraps `CustomWidget` (150px placeholder), `AsyncEditToolResultCard` for `file_change` (280px), and `EditToolResultCard` for `Edit` tools (280px); the VList path still renders inline since virtua already gates per-row. A bottom sentinel + `scrollIntoView({ block: 'end' })` plus a `ResizeObserver` keep the user pinned to the bottom across streaming, image loads, and lazy-mounts. The scroll handler ignores `scrollTop`-unchanged events so layout-driven growth (image load, lazy-mount, streaming chunk) doesn't drop the user out of sticky-bottom. `width: 100%` on `.rich-transcript-content` and `.rich-transcript-flat-list` prevents `mx-auto` from turning into cross-axis flex auto-margins that shrink-wrap rows.
+
 ## [0.60.3] - 2026-05-15
 
 
