@@ -399,10 +399,37 @@ export async function initializeSync(baseStore: SessionStore): Promise<SessionSt
     const initialDeviceInfo = getDeviceInfo(stytchUserId);
     logger.main.info('[SyncManager] Initial device info:', JSON.stringify(initialDeviceInfo));
 
-    // Cache JWT refresh to prevent spamming Stytch during batch sync
-    // JWTs expire in ~5 minutes, so refresh at most once per minute
-    let lastRefreshTime = 0;
-    const MIN_REFRESH_INTERVAL = 60000; // 1 minute
+    // Refresh the personal JWT when its `exp` claim is within this window.
+    // Stytch JWTs live ~5 minutes; refreshing inside the last minute keeps a
+    // comfortable margin against clock skew and round-trip time without
+    // hammering Stytch on every reconnect.
+    const REFRESH_SKEW_MS = 60_000;
+    // Minimum gap between refresh *attempts* when the prior attempt failed.
+    // Without this, a reconnect storm (every WS in the stack calling getJwt
+    // back-to-back) would spam Stytch with doomed refresh calls. We do NOT
+    // throttle on success -- the expiry check above is what gates that path.
+    const FAILED_REFRESH_BACKOFF_MS = 5_000;
+    let lastFailedRefreshTime = 0;
+
+    /**
+     * Returns the `exp` claim (in ms since epoch) for the JWT, or null if it
+     * can't be decoded. JWT signatures are verified by the server; we only
+     * read `exp` to decide if a refresh is needed before reconnect.
+     */
+    function getJwtExpiryMs(jwt: string | null): number | null {
+      if (!jwt) return null;
+      const parts = jwt.split('.');
+      if (parts.length !== 3) return null;
+      try {
+        const padded = parts[1] + '='.repeat((4 - (parts[1].length % 4)) % 4);
+        const payload = JSON.parse(
+          Buffer.from(padded.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString(),
+        ) as { exp?: number };
+        return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+      } catch {
+        return null;
+      }
+    }
 
     // Use personalOrgId and personalUserId for session sync room IDs -- these stay
     // stable even when the JWT is scoped to a team org (after a Stytch session exchange).
@@ -450,18 +477,41 @@ export async function initializeSync(baseStore: SessionStore): Promise<SessionSt
         // which the server validates against the room URL path. The team-scoped JWT
         // (from getSessionJwt) has a different sub and would fail auth.
         const now = Date.now();
-        if (now - lastRefreshTime > MIN_REFRESH_INTERVAL) {
-          const refreshed = await refreshPersonalSession(serverUrl);
-          lastRefreshTime = now;
+        const cachedJwt = getPersonalSessionJwt();
+        const expiryMs = getJwtExpiryMs(cachedJwt);
+        const cachedIsFresh = expiryMs !== null && expiryMs - now > REFRESH_SKEW_MS;
 
-          if (!refreshed) {
-            logger.main.warn('[SyncManager] Personal session refresh failed, JWT may be stale');
+        if (!cachedIsFresh) {
+          // Avoid hammering Stytch in a tight reconnect loop when the prior
+          // refresh just failed. The backoff is short enough that legitimate
+          // recovery (network coming back after sleep) happens within a couple
+          // of WS retry attempts.
+          const failedRecently =
+            lastFailedRefreshTime > 0 && now - lastFailedRefreshTime < FAILED_REFRESH_BACKOFF_MS;
+          if (!failedRecently) {
+            const refreshed = await refreshPersonalSession(serverUrl);
+            if (!refreshed) {
+              lastFailedRefreshTime = Date.now();
+              logger.main.warn('[SyncManager] Personal session refresh failed, JWT may be stale');
+            } else {
+              lastFailedRefreshTime = 0;
+            }
           }
         }
 
         const freshJwt = getPersonalSessionJwt();
         if (!freshJwt || freshJwt.split('.').length !== 3) {
           throw new Error('Failed to get valid personal JWT for session sync');
+        }
+
+        const freshExpiryMs = getJwtExpiryMs(freshJwt);
+        if (freshExpiryMs !== null && freshExpiryMs <= now) {
+          // Returning an already-expired JWT guarantees the server rejects the
+          // upgrade and the WS error loop never escapes. Throw so the caller's
+          // reconnect-with-backoff path runs instead of the bad-token hammer.
+          throw new Error(
+            `[SyncManager] Personal JWT is expired (exp=${new Date(freshExpiryMs).toISOString()}) and refresh did not produce a fresh one`,
+          );
         }
 
         return freshJwt;
@@ -618,14 +668,18 @@ export async function initializeSync(baseStore: SessionStore): Promise<SessionSt
               // missing a value the desktop has.
               (localSession.worktreeId && !serverSession.worktreeId) ||
               (localSession.sessionType && !serverSession.sessionType) ||
-              (localSession.parentSessionId && !serverSession.parentSessionId) ||
               (localSession.provider && !serverSession.provider) ||
               (localSession.model && !serverSession.model) ||
               (localSession.mode && !serverSession.mode) ||
-              // Archive state diverged. updateMetadata intentionally doesn't bump
-              // updated_at (sort stability), so timestamp comparison won't catch
-              // archives. Re-push the index entry without message sync.
-              (Boolean(localSession.isArchived) !== Boolean(serverSession.isArchived))
+              // Value-mismatch checks for fields whose changes don't bump
+              // updated_at. updateMetadata intentionally keeps updated_at stable
+              // for pins/reparents/archives/title-edits to avoid resorting the
+              // list on iOS, so the timestamp comparison above can't catch a
+              // real divergence. Heal those on the next reconnect.
+              (Boolean(localSession.isArchived) !== Boolean(serverSession.isArchived)) ||
+              (Boolean(localSession.isPinned) !== Boolean(serverSession.isPinned)) ||
+              ((localSession.parentSessionId ?? null) !== (serverSession.parentSessionId ?? null)) ||
+              (localSession.title !== serverSession.title)
             ) {
               sessionsNeedingIndexUpdate.push(localSession);
             }

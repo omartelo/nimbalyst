@@ -105,6 +105,7 @@ import { initNetworkAvailabilityListeners } from './store/listeners/networkAvail
 import { initNotificationListeners } from './store/listeners/notificationListeners';
 import { initPermissionListeners } from './store/listeners/permissionListeners';
 import { initSoundListeners } from './store/listeners/soundListeners';
+import { initStytchAuthListeners } from './store/listeners/stytchAuthListeners';
 import { initSyncListeners } from './store/listeners/syncListeners';
 import { initThemeListener } from './store/listeners/themeListeners';
 import { initThemeFallbackListener } from './store/listeners/themeFallbackListeners';
@@ -294,6 +295,7 @@ export default function App() {
     const cleanupNotification = initNotificationListeners();
     const cleanupPermission = initPermissionListeners();
     const cleanupSound = initSoundListeners();
+    const cleanupStytchAuth = initStytchAuthListeners();
     const cleanupSync = initSyncListeners();
     const cleanupTheme = initThemeListener();
     const cleanupThemeFallback = initThemeFallbackListener();
@@ -316,6 +318,7 @@ export default function App() {
       cleanupNotification?.();
       cleanupPermission?.();
       cleanupSound?.();
+      cleanupStytchAuth?.();
       cleanupSync?.();
       cleanupTheme?.();
       cleanupThemeFallback?.();

@@ -19,6 +19,7 @@ import { HelpTooltip } from '../../help';
 import { setActiveSessionAtom } from '../../store';
 import { terminalFeatureAvailableAtom, syncEnabledAtom, syncEnabledProjectsAtom } from '../../store/atoms/appSettings';
 import { workspaceHasTeamAtom } from '../../store/atoms/collabDocuments';
+import { stytchIsSignedInAtom } from '../../store/atoms/stytchAuth';
 import { useAlphaFeature } from '../../hooks/useAlphaFeature';
 import { AlphaBadge } from '../common/AlphaBadge';
 import { UserMenuPopover } from './UserMenuPopover';
@@ -98,6 +99,11 @@ export const NavigationGutter: React.FC<NavigationGutterProps> = ({
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuButtonRef = useRef<HTMLButtonElement>(null);
 
+  // Stytch auth state comes from the central atom (see stytchAuthListeners).
+  // `null` means "still loading" -- treated as signed-in for icon purposes so
+  // we don't flash the logged-out look during startup.
+  const isSignedIn = useAtomValue(stytchIsSignedInAtom);
+
   // Gutter button visibility
   const hiddenButtons = useAtomValue(hiddenGutterButtonsAtom);
   const isHidden = useCallback((id: HideableGutterButton) => hiddenButtons.includes(id), [hiddenButtons]);
@@ -140,6 +146,12 @@ export const NavigationGutter: React.FC<NavigationGutterProps> = ({
 
   // User is "connected" to this project if they have a team or mobile sync configured
   const isProjectConnected = hasTeam || isSyncConfigured;
+
+  // When sync is enabled but the user isn't signed in (creds missing/expired),
+  // surface a logged-out indicator on the user button so the broken-sync state
+  // isn't silent. Wait for the auth state to load before flipping the icon to
+  // avoid flashing the logged-out look during startup.
+  const needsSignIn = syncEnabled && isSignedIn === false;
 
   // Get extension panel buttons from the panel registry
   const extensionPanelButtons = useExtensionGutterButtons();
@@ -628,14 +640,16 @@ export const NavigationGutter: React.FC<NavigationGutterProps> = ({
           <HelpTooltip testId="gutter-user-button" placement="right">
             <button
               ref={userMenuButtonRef}
-              className={`nav-button relative w-9 h-9 flex items-center justify-center border-none rounded-md cursor-pointer transition-all duration-150 p-0 active:scale-95 focus-visible:outline-2 focus-visible:outline-[var(--nim-primary)] focus-visible:outline-offset-2 ${userMenuOpen ? 'bg-nim-tertiary text-nim' : 'bg-transparent text-nim-muted hover:bg-nim-tertiary hover:text-nim'}`}
+              className={`nav-button relative w-9 h-9 flex items-center justify-center border-none rounded-md cursor-pointer transition-all duration-150 p-0 active:scale-95 focus-visible:outline-2 focus-visible:outline-[var(--nim-primary)] focus-visible:outline-offset-2 ${userMenuOpen ? 'bg-nim-tertiary text-nim' : needsSignIn ? 'bg-transparent text-nim-warning hover:bg-nim-tertiary' : 'bg-transparent text-nim-muted hover:bg-nim-tertiary hover:text-nim'}`}
               onClick={() => setUserMenuOpen(!userMenuOpen)}
-              aria-label="User menu"
+              aria-label={needsSignIn ? 'User menu (signed out -- sync requires sign in)' : 'User menu'}
               aria-expanded={userMenuOpen}
+              data-signed-in={isSignedIn === null ? undefined : isSignedIn}
+              data-needs-sign-in={needsSignIn || undefined}
               data-testid="gutter-user-button"
             >
               <MaterialSymbol
-                icon="person"
+                icon={needsSignIn ? 'no_accounts' : 'person'}
                 size={20}
               />
             </button>

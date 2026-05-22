@@ -40,6 +40,7 @@ import {
   refreshSessionListAtom,
   removeSessionFullAtom,
   updateSessionStoreAtom,
+  sessionAgentRoleAtom,
   sessionRegistryAtom,
   sessionStoreAtom,
   pushNavigationEntryAtom,
@@ -60,6 +61,7 @@ import { initFileTreeListeners } from '../../store/listeners/fileTreeListeners';
 import { initSessionListListeners } from '../../store/listeners/sessionListListeners';
 import { initSessionTranscriptListeners } from '../../store/listeners/sessionTranscriptListeners';
 import { initTrayListeners, trayNewSessionRequestAtom } from '../../store/listeners/trayListeners';
+import { initDeepLinkListeners } from '../../store/listeners/deepLinkListeners';
 import { requestOpenSessionAtom } from '../../store/atoms/agentMode';
 import { fetchSessionSharesAtom } from '../../store';
 import type { WorktreeCreateResult, SessionCreateResult } from '../../../shared/ipc/types';
@@ -206,6 +208,12 @@ export const AgentMode = forwardRef<AgentModeRef, AgentModeProps>(function Agent
   // Initialize tray navigation listeners (global, runs once)
   useEffect(() => {
     const cleanup = initTrayListeners();
+    return cleanup;
+  }, []);
+
+  // Initialize deep-link navigation listeners (global, runs once)
+  useEffect(() => {
+    const cleanup = initDeepLinkListeners();
     return cleanup;
   }, []);
 
@@ -987,11 +995,13 @@ export const AgentMode = forwardRef<AgentModeRef, AgentModeProps>(function Agent
   }, [refreshSessions]);
 
   // Check if the selected session is a meta-agent
-  const sessionRegistry = useAtomValue(sessionRegistryAtom);
-  const isSelectedMetaAgent = useMemo(() => {
-    if (!selectedWorkstream) return false;
-    return sessionRegistry.get(selectedWorkstream.id)?.agentRole === 'meta-agent';
-  }, [selectedWorkstream?.id, sessionRegistry]);
+  const selectedWorkstreamId = selectedWorkstream?.id ?? null;
+  const selectedAgentRoleAtom = useMemo(
+    () => (selectedWorkstreamId ? sessionAgentRoleAtom(selectedWorkstreamId) : atom<'standard'>('standard')),
+    [selectedWorkstreamId]
+  );
+  const selectedAgentRole = useAtomValue(selectedAgentRoleAtom);
+  const isSelectedMetaAgent = selectedWorkstreamId !== null && selectedAgentRole === 'meta-agent';
 
   // Content for the right side
   const rightContent = selectedWorkstream ? (

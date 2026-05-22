@@ -42,6 +42,8 @@ import { FileSnapshotCache } from '../../file/FileSnapshotCache';
 import { SessionFileWatcher } from '../../file/SessionFileWatcher';
 import { addGitignoreBypass } from '../../file/WorkspaceEventBus';
 import { workspaceFileEditAttributionService } from '../WorkspaceFileEditAttributionService';
+import { sessionEditQuota } from '../SessionEditQuota';
+import { pathContainsExcludedDir } from '../../utils/fileFilters';
 import { isFileInWorkspaceOrWorktree } from '../../utils/workspaceDetection';
 import {
   safeSend,
@@ -355,6 +357,11 @@ export class HooklessAgentFileWatcher {
         continue;
       }
 
+      if (!(await sessionEditQuota.tryReserve(session.id, filePath))) {
+        watcherEntry?.cache.updateSnapshot(filePath, currentContent);
+        continue;
+      }
+
       const toolUseId = commandItemId || `codex-bash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const tagId = `ai-edit-pending-${session.id}-${toolUseId}`;
 
@@ -436,6 +443,7 @@ export async function extractFilePathsFromCommand(
       // Resolve symlinks so boundary check cannot be bypassed via symlinks.
       const realPath = await fs.promises.realpath(candidate);
       if (!isFileInWorkspaceOrWorktree(realPath, workspacePath)) return;
+      if (pathContainsExcludedDir(realPath)) return;
       // Skip non-regular files (directories, sockets, fifos). Bash commands
       // routinely reference directories as positional args; without this
       // filter every such mention later fails `readFile` with EISDIR.

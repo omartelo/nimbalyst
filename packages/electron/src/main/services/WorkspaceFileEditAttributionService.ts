@@ -5,6 +5,9 @@ import { SessionFilesRepository } from '@nimbalyst/runtime';
 import { historyManager } from '../HistoryManager';
 import { getSubscriberIds } from '../file/WorkspaceEventBus';
 import { logger } from '../utils/logger';
+import { pathContainsExcludedDir } from '../utils/fileFilters';
+import { sessionEditQuota } from './SessionEditQuota';
+import { workspaceAttributionThrottle } from './WorkspaceAttributionThrottle';
 import { toolCallMatcher } from './ToolCallMatcher';
 import { codexEditWindowRegistry } from './CodexEditWindowRegistry';
 
@@ -72,6 +75,15 @@ class WorkspaceFileEditAttributionServiceImpl {
   ingestWatcherEvent(rawEvent: WorkspaceFileEditEvent): void {
     const workspacePath = path.resolve(rawEvent.workspacePath);
     const filePath = path.resolve(rawEvent.filePath);
+    if (pathContainsExcludedDir(filePath)) {
+      return;
+    }
+    // Burst guard: if the workspace is producing watcher events faster than
+    // a human + AI realistically can, assume it's a build or codegen dump
+    // and drop the event before it costs PGLite anything.
+    if (!workspaceAttributionThrottle.tryAcquire(workspacePath)) {
+      return;
+    }
     const event: WorkspaceFileEditEvent = {
       ...rawEvent,
       workspacePath,
@@ -279,6 +291,10 @@ class WorkspaceFileEditAttributionServiceImpl {
         return;
       }
       state.processedEventKeys.set(eventKey, Date.now());
+
+      if (!(await sessionEditQuota.tryReserve(winner.sessionId, event.filePath))) {
+        return;
+      }
 
       const toolUseId = winner.toolUseId || this.makeWatcherToolUseId(event);
 
