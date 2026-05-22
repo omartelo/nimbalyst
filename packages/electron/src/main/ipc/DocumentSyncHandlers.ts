@@ -10,10 +10,11 @@ import { net } from 'electron';
 import * as fs from 'fs/promises';
 import { safeHandle } from '../utils/ipcRegistry';
 import { logger } from '../utils/logger';
+import { getCollabSyncWsUrl, getCollabSyncHttpUrl } from '../utils/collabSyncUrl';
 import { isAuthenticated, getStytchUserId, getUserEmail, getAuthState, getPersonalSessionJwt, refreshPersonalSession } from '../services/StytchAuthService';
 import { findTeamForWorkspace, getOrgScopedJwt } from '../services/TeamService';
 import { getOrgKey, getOrgKeyFingerprint, getOrCreateIdentityKeyPair, uploadIdentityKeyToOrg, fetchAndUnwrapOrgKey, clearOrgKey } from '../services/OrgKeyService';
-import { getSessionSyncConfig, getWorkspaceState, updateWorkspaceState } from '../utils/store';
+import { getWorkspaceState, updateWorkspaceState } from '../utils/store';
 import { getPersonalDocSyncConfig, isSyncEnabled } from '../services/SyncManager';
 import { getSyncId } from '../services/DocSyncService';
 import {
@@ -29,6 +30,14 @@ import {
   resolveAssetRef,
   rewriteMarkdownImageRefs,
 } from '../services/markdownAssetScanner';
+import {
+  clearLocalOriginBinding,
+  findLinkedDocumentForLocalPath,
+  getLocalOriginBinding,
+  recordLocalOriginShare,
+  relinkLocalOriginBinding,
+  reuploadFromLocalOrigin,
+} from '../services/CollabLocalOriginService';
 import WebSocket from 'ws';
 
 /** Max concurrent uploads in a single migrate-local-assets pass. Keeps a    */
@@ -50,9 +59,6 @@ export type AssetMigrationResult =
 const proxiedWebSockets = new Map<string, WebSocket>();
 let wsIdCounter = 0;
 
-const PRODUCTION_SYNC_URL = 'wss://sync.nimbalyst.com';
-const DEVELOPMENT_SYNC_URL = 'ws://localhost:8790';
-
 function getCollabPendingKey(orgId: string, documentId: string): string {
   return `org:${orgId}:doc:${documentId}`;
 }
@@ -63,18 +69,6 @@ function getCollabPendingKey(orgId: string, documentId: string): string {
  * (and trigger Node's MaxListenersExceededWarning at 10+ docs).
  */
 const senderDestroyedHooked = new Set<number>();
-
-function getSyncWsUrl(): string {
-  const config = getSessionSyncConfig();
-  const isDev = process.env.NODE_ENV !== 'production';
-  const env = isDev ? config?.environment : undefined;
-  return env === 'development' ? DEVELOPMENT_SYNC_URL : PRODUCTION_SYNC_URL;
-}
-
-function getSyncHttpUrl(): string {
-  const wsUrl = getSyncWsUrl();
-  return wsUrl.replace('wss://', 'https://').replace('ws://', 'http://');
-}
 
 /** Build a human-readable display name from Stytch user data. Falls back to email, then userId. */
 function getUserDisplayName(userId: string): string {
@@ -138,7 +132,7 @@ export function registerDocumentSyncHandlers(): void {
       try {
         const orgJwt = await getOrgScopedJwt(orgId);
         const { net } = await import('electron');
-        const serverUrl = getSyncHttpUrl();
+        const serverUrl = getCollabSyncHttpUrl();
         const fpResp = await net.fetch(`${serverUrl}/api/teams/${orgId}/org-key-fingerprint`, {
           headers: { 'Authorization': `Bearer ${orgJwt}` },
         });
@@ -165,17 +159,17 @@ export function registerDocumentSyncHandlers(): void {
     const rawBytes = await crypto.subtle.exportKey('raw', encryptionKey!);
     const orgKeyBase64 = Buffer.from(rawBytes).toString('base64');
 
-    const serverUrl = getSyncWsUrl();
+    const serverUrl = getCollabSyncWsUrl();
     const pendingKey = getCollabPendingKey(orgId, payload.documentId);
     const pendingUpdateBase64 = getWorkspaceState(payload.workspacePath)
       .collabPendingUpdates?.[pendingKey]?.mergedUpdateBase64;
 
-    logger.main.info('[DocumentSyncHandlers] Resolved collab config', {
-      orgId,
-      documentId: payload.documentId,
-      serverUrl,
-      userId,
-    });
+    // logger.main.info('[DocumentSyncHandlers] Resolved collab config', {
+    //   orgId,
+    //   documentId: payload.documentId,
+    //   serverUrl,
+    //   userId,
+    // });
 
     const orgKeyFp = getOrgKeyFingerprint(orgId) ?? undefined;
 
@@ -259,7 +253,7 @@ export function registerDocumentSyncHandlers(): void {
       fileBytes: payload.fileBytes,
       mimeType: payload.mimeType,
       fileName: payload.fileName,
-      syncHttpUrl: getSyncHttpUrl(),
+      syncHttpUrl: getCollabSyncHttpUrl(),
     });
   });
 
@@ -302,7 +296,7 @@ export function registerDocumentSyncHandlers(): void {
       };
     }
 
-    const syncHttpUrl = getSyncHttpUrl();
+    const syncHttpUrl = getCollabSyncHttpUrl();
     const results: AssetMigrationResult[] = new Array(refs.length);
     const substitutions = new Map<string, string>();
 
@@ -415,7 +409,7 @@ export function registerDocumentSyncHandlers(): void {
     try {
       const orgJwt = await getOrgScopedJwt(payload.orgId);
       const result = await deleteRemovedAssets(
-        getSyncHttpUrl(),
+        getCollabSyncHttpUrl(),
         orgJwt,
         payload.documentId,
         payload.removedUris
@@ -447,6 +441,88 @@ export function registerDocumentSyncHandlers(): void {
       };
     });
     return { success: true };
+  });
+
+  safeHandle('document-sync:get-local-origin', async (_event, payload: {
+    workspacePath: string;
+    documentId: string;
+  }) => {
+    try {
+      const binding = await getLocalOriginBinding(payload.workspacePath, payload.documentId);
+      return { success: true, binding };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  safeHandle('document-sync:save-local-origin', async (_event, payload: {
+    workspacePath: string;
+    documentId: string;
+    documentType: string;
+    sourceFilePath: string;
+    lastLocalContentHash: string | null;
+    lastCollabContentHash: string | null;
+  }) => {
+    try {
+      const binding = await recordLocalOriginShare(payload);
+      return { success: true, binding };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  safeHandle('document-sync:relink-local-origin', async (_event, payload: {
+    workspacePath: string;
+    documentId: string;
+    documentType: string;
+    sourceFilePath: string;
+  }) => {
+    try {
+      const binding = await relinkLocalOriginBinding(payload);
+      return { success: true, binding };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  safeHandle('document-sync:clear-local-origin', async (_event, payload: {
+    workspacePath: string;
+    documentId: string;
+  }) => {
+    try {
+      await clearLocalOriginBinding(payload.workspacePath, payload.documentId);
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  safeHandle('document-sync:reupload-local-origin', async (_event, payload: {
+    workspacePath: string;
+    documentId: string;
+    forceOverwriteShared?: boolean;
+  }) => {
+    try {
+      return await reuploadFromLocalOrigin(payload);
+    } catch (err) {
+      return {
+        success: false,
+        status: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  safeHandle('document-sync:find-local-origin-link', async (_event, payload: {
+    workspacePath: string;
+    sourceFilePath: string;
+  }) => {
+    try {
+      const binding = await findLinkedDocumentForLocalPath(payload.workspacePath, payload.sourceFilePath);
+      return { success: true, binding };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   /**
@@ -594,7 +670,7 @@ export function registerDocumentSyncHandlers(): void {
     const rawBytes = await crypto.subtle.exportKey('raw', encryptionKey);
     const orgKeyBase64 = Buffer.from(rawBytes).toString('base64');
     const orgKeyFingerprint = await getOrgKeyFingerprint(orgId);
-    const serverUrl = getSyncWsUrl();
+    const serverUrl = getCollabSyncWsUrl();
 
     // logger.main.info('[DocumentSyncHandlers] Resolved doc index config', { orgId, serverUrl, userId });
 
@@ -688,11 +764,7 @@ export function registerDocumentSyncHandlers(): void {
    */
   safeHandle('document-sync:get-personal-jwt', async () => {
     try {
-      const isDev = process.env.NODE_ENV !== 'production';
-      const config = getSessionSyncConfig();
-      const env = isDev ? config?.environment : undefined;
-      const serverUrl = env === 'development' ? DEVELOPMENT_SYNC_URL : PRODUCTION_SYNC_URL;
-
+      const serverUrl = getCollabSyncWsUrl();
       await refreshPersonalSession(serverUrl);
       const jwt = getPersonalSessionJwt();
       if (!jwt) {

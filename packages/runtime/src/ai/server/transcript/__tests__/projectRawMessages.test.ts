@@ -243,6 +243,66 @@ describe('projectRawMessagesToViewMessages', () => {
     });
   });
 
+  describe('Codex app-server transport', () => {
+    // Regression: the mobile path used to hardcode CodexRawParser (SDK shape),
+    // so app-server-transport sessions parsed every output message as garbage,
+    // the catch in rawMessagesToCanonicalEvents swallowed the throws, and only
+    // user prompts (which share an input shape across transports) rendered.
+    // The fix routes through CodexRawParserDispatcher.
+    it('projects assistant + tool_call events from app-server-transport messages', async () => {
+      const messages: RawMessage[] = [
+        raw({
+          id: 1,
+          source: 'openai-codex',
+          direction: 'input',
+          content: JSON.stringify({ prompt: 'Hello codex' }),
+        }),
+        raw({
+          id: 2,
+          source: 'openai-codex',
+          metadata: { transport: 'app-server', eventType: 'item/completed' },
+          content: JSON.stringify({
+            method: 'item/completed',
+            params: {
+              item: {
+                id: 'item_0',
+                type: 'agentMessage',
+                status: 'completed',
+                text: 'Sure -- hi back!',
+              },
+            },
+          }),
+        }),
+        raw({
+          id: 3,
+          source: 'openai-codex',
+          metadata: { transport: 'app-server', eventType: 'item/completed' },
+          content: JSON.stringify({
+            method: 'item/completed',
+            params: {
+              item: {
+                id: 'item_1',
+                type: 'mcpToolCall',
+                status: 'completed',
+                server: 'nimbalyst-mcp',
+                tool: 'developer_git_log',
+                arguments: { limit: 5 },
+                result: { content: [{ type: 'text', text: 'log output' }] },
+              },
+            },
+          }),
+        }),
+      ];
+
+      const vms = await projectRawMessagesToViewMessages(messages, 'openai-codex');
+
+      expect(vms.find(m => m.type === 'user_message')?.text).toBe('Hello codex');
+      expect(vms.find(m => m.type === 'assistant_message')?.text).toBe('Sure -- hi back!');
+      const toolCall = vms.find(m => m.type === 'tool_call');
+      expect(toolCall?.toolCall?.toolName).toBe('mcp__nimbalyst-mcp__developer_git_log');
+    });
+  });
+
   describe('Codex ACP provider', () => {
     // Regression: mobile parser-selection used to fall through to ClaudeCodeRawParser
     // for openai-codex-acp sessions, silently dropping every ACP session/update

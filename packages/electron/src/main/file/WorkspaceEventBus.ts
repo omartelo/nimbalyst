@@ -4,6 +4,7 @@ import * as path from 'path';
 import chokidar, { FSWatcher as ChokidarFSWatcher } from 'chokidar';
 import ignore, { Ignore } from 'ignore';
 import { logger } from '../utils/logger';
+import { shouldExcludeDir } from '../utils/fileFilters';
 import { isPathInWorkspace } from '../utils/workspaceDetection';
 
 /**
@@ -88,6 +89,11 @@ const FALLBACK_IGNORE_PATTERNS = [
 /** Normalize a path to forward slashes for consistent Set comparisons across platforms. */
 function normalizeToForwardSlash(p: string): string {
   return p.replace(/\\/g, '/');
+}
+
+function pathContainsExcludedDir(relativePath: string): boolean {
+  const segments = normalizeToForwardSlash(relativePath).split('/').filter(Boolean);
+  return segments.some((segment) => shouldExcludeDir(segment));
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +270,10 @@ function shouldIgnoreHardcoded(relativePath: string): boolean {
     if (ALWAYS_IGNORED_DIRS.has(seg)) {
       return true;
     }
+  }
+
+  if (pathContainsExcludedDir(relativePath)) {
+    return true;
   }
 
   const basename = segments[segments.length - 1];
@@ -597,6 +607,15 @@ export function addGitignoreBypass(workspacePath: string, absolutePath: string):
   // Validate that the path is inside the workspace
   if (!isPathInWorkspace(absolutePath, key)) {
     logger.main.debug('[WorkspaceEventBus] Rejected gitignore bypass for path outside workspace:', {
+      workspacePath: key,
+      absolutePath,
+    });
+    return;
+  }
+
+  const relativePath = path.relative(key, absolutePath);
+  if (relativePath && !relativePath.startsWith('..') && pathContainsExcludedDir(relativePath)) {
+    logger.main.debug('[WorkspaceEventBus] Rejected gitignore bypass for excluded path:', {
       workspacePath: key,
       absolutePath,
     });

@@ -25,6 +25,17 @@ import { isAppleMobileWebKit } from '../../../utils/platform';
 // doesn't re-measure all items from scratch
 const vlistCacheMap = new Map<string, CacheSnapshot>();
 
+function summarizeRenderTeammates(
+  teammates: Array<{ agentId: string; status: 'running' | 'completed' | 'errored' | 'idle' }> | undefined
+): string {
+  if (!teammates || teammates.length === 0) return 'none';
+  return teammates.map(tm => `${tm.agentId}:${tm.status}`).join(', ');
+}
+
+function emitRichTranscriptRenderTrace(event: string, payload: Record<string, unknown>): void {
+  // console.info(`[RenderTrace][RichTranscriptView] ${event} ${JSON.stringify(payload)}`);
+}
+
 // Inject RichTranscriptView styles once (for animations, scrollbar, and complex selectors)
 const injectRichTranscriptStyles = () => {
   const styleId = 'rich-transcript-view-styles';
@@ -134,62 +145,6 @@ const injectRichTranscriptStyles = () => {
     }
     .rich-transcript-content.compact .rich-transcript-vlist > div {
       max-width: 72rem;
-    }
-
-    /* Flat-list mode for Chromium hosts. We render every message as plain
-       DOM with no virtualization and no content-visibility tricks. The
-       browser handles paint optimization for off-screen content on its own,
-       and DOM node identity is preserved across scroll so the Selection API
-       works correctly -- which is the whole point of this path. iOS still
-       uses VList for memory reasons; see useVirtualization. */
-    .rich-transcript-flat-list {
-      display: flex;
-      flex-direction: column;
-      max-width: 64rem;
-      margin: 0 auto;
-      padding: 0 0.75rem;
-    }
-    .rich-transcript-content.compact .rich-transcript-flat-list {
-      max-width: 72rem;
-    }
-    /* Chat-bottom layout: when transcript content is shorter than the
-       scrollable viewport, push it against the bottom so the latest message
-       sits next to the input. When content overflows, this is a no-op and
-       normal top-to-bottom scrolling takes over.
-       The explicit width:100% on the children is critical: making the scroll
-       container a flex column would otherwise let the existing mx-auto on
-       .rich-transcript-content (and margin:0 auto on .rich-transcript-flat-list)
-       behave as flex-item cross-axis auto-margins, killing align-items:stretch
-       and shrink-wrapping every row to its content width. */
-    .rich-transcript-scroll-container.flat {
-      display: flex;
-      flex-direction: column;
-    }
-    .rich-transcript-scroll-container.flat > .rich-transcript-content {
-      margin-top: auto;
-      width: 100%;
-    }
-    .rich-transcript-flat-list {
-      width: 100%;
-    }
-    /* Scroll-container scrollbar styling, mirrors the VList rule above so the
-       flat-list path shares the same thin themed scrollbar. */
-    .rich-transcript-scroll-container.flat {
-      scrollbar-width: thin;
-      scrollbar-color: var(--nim-scrollbar-thumb) transparent;
-    }
-    .rich-transcript-scroll-container.flat::-webkit-scrollbar {
-      width: 8px;
-    }
-    .rich-transcript-scroll-container.flat::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    .rich-transcript-scroll-container.flat::-webkit-scrollbar-thumb {
-      background-color: var(--nim-scrollbar-thumb);
-      border-radius: 4px;
-    }
-    .rich-transcript-scroll-container.flat::-webkit-scrollbar-thumb:hover {
-      background-color: var(--nim-scrollbar-thumb-hover);
     }
 
     /* Copy button hover visibility */
@@ -1063,59 +1018,6 @@ export const extractEditsFromToolMessage = (message: TranscriptViewMessage): any
   return edits;
 };
 
-/**
- * Defers mounting heavy children (diff views, custom tool widgets) until
- * the placeholder is within `rootMargin` of the viewport. After mounting
- * once, the children stay mounted -- which is critical for the Selection
- * API: an unmount-on-scroll-out approach would destroy any active selection
- * across the boundary, which is exactly what we're trying to avoid by not
- * virtualizing the flat-list.
- *
- * The placeholder is a real DOM element with a known `minHeight`, so layout
- * (and DOM hit-testing for drag-selection) is stable. When real content
- * mounts and its measured height differs from the placeholder, there's a
- * one-time scroll shift below the mount point; the generous `rootMargin`
- * lets it happen while the area is off-screen for the user.
- */
-function LazyMount({
-  placeholderHeight,
-  rootMargin = '600px',
-  children,
-}: {
-  placeholderHeight: number;
-  rootMargin?: string;
-  children: () => React.ReactNode;
-}): JSX.Element {
-  const [mounted, setMounted] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (mounted) return;
-    const el = ref.current;
-    if (!el) return;
-    if (typeof IntersectionObserver === 'undefined') {
-      setMounted(true);
-      return;
-    }
-    const io = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          setMounted(true);
-          io.disconnect();
-        }
-      },
-      { rootMargin }
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [mounted, rootMargin]);
-
-  if (mounted) {
-    return <>{children()}</>;
-  }
-  return <div ref={ref} style={{ minHeight: placeholderHeight }} aria-hidden="true" />;
-}
-
 export const RichTranscriptView = React.forwardRef<
   { scrollToMessage: (index: number) => void; scrollToTop: () => void },
   RichTranscriptViewProps
@@ -1146,20 +1048,30 @@ export const RichTranscriptView = React.forwardRef<
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const viewRootRef = useRef<HTMLDivElement>(null);
   const vlistRef = useRef<VListHandle>(null);
-  const flatListRef = useRef<HTMLDivElement>(null);
-  const flatBottomSentinelRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const isAtBottomRef = useRef(
     persistScrollState ? getSessionIsAtBottom(sessionId) : true
   );
 
-  // Keep VList on every host. Desktop gets a wider buffer to reduce churn
-  // near the viewport without switching to the flat-list experiment.
+  // Desktop gets a wider buffer to reduce row churn near selection;
+  // iOS WKWebView uses a smaller buffer for memory pressure.
   const isMobileWebKit = useMemo(() => isAppleMobileWebKit(), []);
-  const useVirtualization = true;
   const vlistBufferSize = isMobileWebKit ? MOBILE_TRANSCRIPT_BUFFER_PX : DESKTOP_TRANSCRIPT_BUFFER_PX;
 
   const settings = propsSettings || defaultSettings;
+  const previousRenderRef = useRef<{
+    messagesRef: TranscriptViewMessage[];
+    messageCount: number;
+    sessionStatus: string | undefined;
+    isProcessing: boolean | undefined;
+    hasPendingInteractivePrompt: boolean | undefined;
+    currentTeammatesRef: unknown;
+    currentTeammatesSummary: string;
+    isContainerVisible: boolean;
+    isScrollReady: boolean;
+    showPermissionBanner: boolean;
+    showSearchBar: boolean;
+  } | null>(null);
 
   useEffect(() => {
     isAtBottomRef.current = persistScrollState ? getSessionIsAtBottom(sessionId) : true;
@@ -1201,6 +1113,64 @@ export const RichTranscriptView = React.forwardRef<
     io.observe(el);
     return () => io.disconnect();
   }, []);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+
+    const nextState = {
+      messagesRef: messages,
+      messageCount: messages.length,
+      sessionStatus,
+      isProcessing,
+      hasPendingInteractivePrompt,
+      currentTeammatesRef: currentTeammates,
+      currentTeammatesSummary: summarizeRenderTeammates(currentTeammates),
+      isContainerVisible,
+      isScrollReady,
+      showPermissionBanner,
+      showSearchBar,
+    };
+    const previous = previousRenderRef.current;
+    if (!previous) {
+      emitRichTranscriptRenderTrace('initial', {
+        sessionId,
+        messageCount: nextState.messageCount,
+        sessionStatus,
+        isProcessing,
+        hasPendingInteractivePrompt,
+        currentTeammates: nextState.currentTeammatesSummary,
+        isContainerVisible,
+        isScrollReady,
+        showPermissionBanner,
+        showSearchBar,
+      });
+    } else {
+      const reasons: string[] = [];
+      if (previous.messagesRef !== nextState.messagesRef) reasons.push(`messages-ref ${previous.messageCount}->${nextState.messageCount}`);
+      if (previous.sessionStatus !== nextState.sessionStatus) reasons.push(`sessionStatus ${String(previous.sessionStatus)}->${String(nextState.sessionStatus)}`);
+      if (previous.isProcessing !== nextState.isProcessing) reasons.push(`isProcessing ${String(previous.isProcessing)}->${String(nextState.isProcessing)}`);
+      if (previous.hasPendingInteractivePrompt !== nextState.hasPendingInteractivePrompt) reasons.push(`pendingPrompt ${String(previous.hasPendingInteractivePrompt)}->${String(nextState.hasPendingInteractivePrompt)}`);
+      if (previous.currentTeammatesRef !== nextState.currentTeammatesRef) reasons.push(`currentTeammates ${previous.currentTeammatesSummary}->${nextState.currentTeammatesSummary}`);
+      if (previous.isContainerVisible !== nextState.isContainerVisible) reasons.push(`isContainerVisible ${String(previous.isContainerVisible)}->${String(nextState.isContainerVisible)}`);
+      if (previous.isScrollReady !== nextState.isScrollReady) reasons.push(`isScrollReady ${String(previous.isScrollReady)}->${String(nextState.isScrollReady)}`);
+      if (previous.showPermissionBanner !== nextState.showPermissionBanner) reasons.push(`showPermissionBanner ${String(previous.showPermissionBanner)}->${String(nextState.showPermissionBanner)}`);
+      if (previous.showSearchBar !== nextState.showSearchBar) reasons.push(`showSearchBar ${String(previous.showSearchBar)}->${String(nextState.showSearchBar)}`);
+      emitRichTranscriptRenderTrace('render', {
+        sessionId,
+        reasons,
+        messageCount: nextState.messageCount,
+        sessionStatus,
+        isProcessing,
+        hasPendingInteractivePrompt,
+        currentTeammates: nextState.currentTeammatesSummary,
+        isContainerVisible,
+        isScrollReady,
+        showPermissionBanner,
+        showSearchBar,
+      });
+    }
+    previousRenderRef.current = nextState;
+  });
 
   const runningTeammates = useMemo(
     () => currentTeammates?.filter(t => t.status === 'running') ?? [],
@@ -1346,45 +1316,27 @@ export const RichTranscriptView = React.forwardRef<
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
             if (pendingPermissionIndices.length === 0) return;
-            let anyVisible = false;
-            if (useVirtualization) {
-              if (!vlistRef.current) return;
-              const offset = vlistRef.current.scrollOffset;
-              const viewportSize = vlistRef.current.viewportSize;
-              const firstVisibleIdx = vlistRef.current.findItemIndex(offset);
-              const lastVisibleIdx = vlistRef.current.findItemIndex(offset + viewportSize);
-              anyVisible = pendingPermissionIndices.some(
-                idx => idx >= firstVisibleIdx && idx <= lastVisibleIdx
-              );
-            } else {
-              const container = scrollContainerRef.current;
-              if (!container) return;
-              const containerRect = container.getBoundingClientRect();
-              anyVisible = pendingPermissionIndices.some(idx => {
-                const el = messageRefs.current.get(idx);
-                if (!el) return false;
-                const r = el.getBoundingClientRect();
-                return r.bottom > containerRect.top && r.top < containerRect.bottom;
-              });
-            }
+            if (!vlistRef.current) return;
+            const offset = vlistRef.current.scrollOffset;
+            const viewportSize = vlistRef.current.viewportSize;
+            const firstVisibleIdx = vlistRef.current.findItemIndex(offset);
+            const lastVisibleIdx = vlistRef.current.findItemIndex(offset + viewportSize);
+            const anyVisible = pendingPermissionIndices.some(
+              idx => idx >= firstVisibleIdx && idx <= lastVisibleIdx
+            );
             pendingPermissionsVisibleRef.current = anyVisible;
             setShowPermissionBanner(!anyVisible);
           });
         });
       });
     }
-  }, [pendingPermissionIndices, sessionId, useVirtualization]);
+  }, [pendingPermissionIndices, sessionId]);
 
   // Expose scroll method via ref
   React.useImperativeHandle(ref, () => ({
     scrollToMessage: (index: number) => {
-      if (useVirtualization) {
-        if (!vlistRef.current) return;
-        vlistRef.current.scrollToIndex(index, { align: 'center' });
-      } else {
-        const messageDiv = messageRefs.current.get(index);
-        messageDiv?.scrollIntoView({ block: 'center', behavior: 'auto' });
-      }
+      if (!vlistRef.current) return;
+      vlistRef.current.scrollToIndex(index, { align: 'center' });
       // Highlight after scroll settles
       setTimeout(() => {
         const messageDiv = messageRefs.current.get(index);
@@ -1397,13 +1349,9 @@ export const RichTranscriptView = React.forwardRef<
       }, 100);
     },
     scrollToTop: () => {
-      if (useVirtualization) {
-        vlistRef.current?.scrollToIndex(0, { align: 'start' });
-      } else if (scrollContainerRef.current) {
-        scrollContainerRef.current.scrollTop = 0;
-      }
+      vlistRef.current?.scrollToIndex(0, { align: 'start' });
     }
-  }), [useVirtualization]);
+  }), []);
 
   // Reset scroll-ready state when session changes or container hides
   useEffect(() => {
@@ -1423,127 +1371,32 @@ export const RichTranscriptView = React.forwardRef<
     // Single RAF: wrapper is opacity:0 until scroll-ready, so intermediate state is invisible.
     // With itemSize hint + cache, VList can estimate scroll position accurately on first try.
     requestAnimationFrame(() => {
-      if (useVirtualization) {
-        vlistRef.current?.scrollToIndex(messages.length - 1, { align: 'end' });
-      } else {
-        flatBottomSentinelRef.current?.scrollIntoView({ block: 'end', behavior: 'auto' });
-      }
+      vlistRef.current?.scrollToIndex(messages.length - 1, { align: 'end' });
       requestAnimationFrame(() => {
         setIsScrollReady(true);
       });
     });
-  }, [sessionId, isContainerVisible, useVirtualization]); // Re-run when session changes or container becomes visible
+  }, [sessionId, isContainerVisible]); // Re-run when session changes or container becomes visible
 
   // Auto-scroll to bottom when messages change (if user was at bottom)
   useEffect(() => {
     const wasAtBottom = getAtBottomState();
 
     requestAnimationFrame(() => {
-      if (useVirtualization) {
-        if (!vlistRef.current) return;
-        const scrollSize = vlistRef.current.scrollSize;
-        const viewportSize = vlistRef.current.viewportSize;
-        const scrollOffset = vlistRef.current.scrollOffset;
-        const distanceFromBottom = scrollSize - scrollOffset - viewportSize;
-
-        if (shouldAutoScrollTranscript(wasAtBottom, distanceFromBottom)) {
-          // Account for the "Thinking..." indicator which is an extra item after messages
-          const lastIndex = isWaitingForResponse ? messages.length : messages.length - 1;
-          vlistRef.current.scrollToIndex(lastIndex, { align: 'end' });
-          setAtBottomState(true);
-        }
-      } else {
-        const container = scrollContainerRef.current;
-        if (!container) return;
-        const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-
-        if (shouldAutoScrollTranscript(wasAtBottom, distanceFromBottom)) {
-          flatBottomSentinelRef.current?.scrollIntoView({ block: 'end', behavior: 'auto' });
-          setAtBottomState(true);
-        }
-      }
-    });
-  }, [getAtBottomState, messages, isWaitingForResponse, setAtBottomState, useVirtualization]);
-
-  // Flat-list mode: bind a scroll handler to the container to mirror the
-  // tracking that VList does internally (isAtBottom atom, scroll-to-bottom
-  // button visibility, permission banner visibility).
-  useEffect(() => {
-    if (useVirtualization) return;
-    const container = scrollContainerRef.current;
-    if (!container) return;
-
-    // Only update the at-bottom atom when scrollTop actually changes. Streaming
-    // content growth grows scrollHeight without moving scrollTop, which would
-    // otherwise drop us out of sticky-scroll mode by tripping the at-bottom
-    // distance check. The scrollTopChanged guard keeps sticky-bottom intact
-    // through streaming updates.
-    let lastScrollTop = container.scrollTop;
-
-    const handleScroll = () => {
-      const scrollSize = container.scrollHeight;
-      const viewportSize = container.clientHeight;
-      const scrollOffset = container.scrollTop;
-      const scrollTopChanged = scrollOffset !== lastScrollTop;
-      lastScrollTop = scrollOffset;
+      if (!vlistRef.current) return;
+      const scrollSize = vlistRef.current.scrollSize;
+      const viewportSize = vlistRef.current.viewportSize;
+      const scrollOffset = vlistRef.current.scrollOffset;
       const distanceFromBottom = scrollSize - scrollOffset - viewportSize;
-      const isAtBottom = isTranscriptAtBottom(distanceFromBottom);
-      // If the user actually scrolled, reflect their position. If only the
-      // layout shifted, only sync the atom when it would set true (so we
-      // never drop sticky-bottom due to content expansion).
-      if (scrollTopChanged || isAtBottom) {
-        setAtBottomState(isAtBottom);
-      }
-      if (scrollButtonRef.current) {
-        const show = distanceFromBottom > viewportSize;
-        scrollButtonRef.current.style.opacity = show ? '1' : '0';
-        scrollButtonRef.current.style.pointerEvents = show ? '' : 'none';
-      }
-      if (pendingPermissionIndices.length > 0) {
-        const containerRect = container.getBoundingClientRect();
-        const anyVisible = pendingPermissionIndices.some(idx => {
-          const el = messageRefs.current.get(idx);
-          if (!el) return false;
-          const r = el.getBoundingClientRect();
-          return r.bottom > containerRect.top && r.top < containerRect.bottom;
-        });
-        if (pendingPermissionsVisibleRef.current !== anyVisible) {
-          pendingPermissionsVisibleRef.current = anyVisible;
-          setShowPermissionBanner(!anyVisible);
-        }
-      } else if (showPermissionBanner) {
-        setShowPermissionBanner(false);
-      }
-    };
 
-    container.addEventListener('scroll', handleScroll, { passive: true });
-    return () => container.removeEventListener('scroll', handleScroll);
-  }, [useVirtualization, setAtBottomState, pendingPermissionIndices, showPermissionBanner]);
-
-  // Flat-list mode: when content grows (new streamed chunk, async-loaded
-  // image, code block syntax-highlighting, etc.), re-pin to the bottom as
-  // long as the user is in sticky-bottom mode. The useEffect above fires
-  // only when the messages array changes; this ResizeObserver catches
-  // layout-driven growth between message updates (e.g. token-by-token
-  // streaming inside an already-rendered assistant row).
-  useEffect(() => {
-    if (useVirtualization) return;
-    const flatList = flatListRef.current;
-    if (!flatList) return;
-
-    let lastHeight = flatList.scrollHeight;
-    const ro = new ResizeObserver(() => {
-      const nextHeight = flatList.scrollHeight;
-      if (nextHeight > lastHeight && getAtBottomState()) {
-        flatBottomSentinelRef.current?.scrollIntoView({ block: 'end', behavior: 'auto' });
+      if (shouldAutoScrollTranscript(wasAtBottom, distanceFromBottom)) {
+        // Account for the "Thinking..." indicator which is an extra item after messages
+        const lastIndex = isWaitingForResponse ? messages.length : messages.length - 1;
+        vlistRef.current.scrollToIndex(lastIndex, { align: 'end' });
+        setAtBottomState(true);
       }
-      lastHeight = nextHeight;
     });
-    ro.observe(flatList);
-    return () => ro.disconnect();
-  }, [getAtBottomState, useVirtualization]);
-
-
+  }, [getAtBottomState, messages, isWaitingForResponse, setAtBottomState]);
 
   // Listen for routed search events from AgentWorkstreamPanel
   // Only respond if this session is the active one
@@ -1581,15 +1434,11 @@ export const RichTranscriptView = React.forwardRef<
   }, [sessionId, showSearchBar]);
 
   const scrollToBottom = useCallback(() => {
-    if (useVirtualization) {
-      if (!vlistRef.current) return;
-      // Account for the "Thinking..." indicator which is an extra item after messages
-      const lastIndex = isWaitingForResponse ? messages.length : messages.length - 1;
-      vlistRef.current.scrollToIndex(lastIndex, { align: 'end' });
-    } else {
-      flatBottomSentinelRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });
-    }
-  }, [messages.length, isWaitingForResponse, useVirtualization]);
+    if (!vlistRef.current) return;
+    // Account for the "Thinking..." indicator which is an extra item after messages
+    const lastIndex = isWaitingForResponse ? messages.length : messages.length - 1;
+    vlistRef.current.scrollToIndex(lastIndex, { align: 'end' });
+  }, [messages.length, isWaitingForResponse]);
 
   const toggleMessageCollapse = (index: number) => {
     setCollapsedMessages(prev => {
@@ -1754,15 +1603,6 @@ export const RichTranscriptView = React.forwardRef<
     const isTeammate = isSubAgent && !!(toolMsg.subagent?.teammateName || toolMsg.subagent?.teamName);
     const hasChildren = isSubAgent && toolMsg.subagent?.childEvents && toolMsg.subagent.childEvents.length > 0;
 
-    // Lazy-mount heavy widget bodies on the flat-list path so a long
-    // transcript doesn't pay the full mount cost up-front. VList already
-    // mounts rows on demand, so nested lazy-mount would just flicker; in
-    // that path we render immediately.
-    const wrapHeavy = (placeholderHeight: number, render: () => React.ReactNode): React.ReactNode => {
-      if (useVirtualization) return render();
-      return <LazyMount placeholderHeight={placeholderHeight}>{render}</LazyMount>;
-    };
-
     // Check for custom widget first
     const CustomWidget = tool.toolName ? getCustomToolWidget(tool.toolName) : undefined;
     if (CustomWidget) {
@@ -1772,19 +1612,17 @@ export const RichTranscriptView = React.forwardRef<
           className={`rich-transcript-tool-container mb-2 ${depth > 0 ? 'nested ml-0' : ''}`}
           style={{ marginLeft: depth > 0 ? '1rem' : '0' }}
         >
-          {wrapHeavy(150, () => (
-            <ToolWidgetErrorBoundary toolName={tool.toolName}>
-              <CustomWidget
-                message={toolMsg}
-                isExpanded={isExpanded}
-                onToggle={() => toggleToolExpand(toolId)}
-                workspacePath={workspacePath}
-                sessionId={sessionId}
-                readFile={readFile}
-                getToolCallDiffs={getToolCallDiffs}
-              />
-            </ToolWidgetErrorBoundary>
-          ))}
+          <ToolWidgetErrorBoundary toolName={tool.toolName}>
+            <CustomWidget
+              message={toolMsg}
+              isExpanded={isExpanded}
+              onToggle={() => toggleToolExpand(toolId)}
+              workspacePath={workspacePath}
+              sessionId={sessionId}
+              readFile={readFile}
+              getToolCallDiffs={getToolCallDiffs}
+            />
+          </ToolWidgetErrorBoundary>
         </div>
       );
     }
@@ -1801,16 +1639,14 @@ export const RichTranscriptView = React.forwardRef<
           className={`rich-transcript-tool-container mb-2 ${depth > 0 ? 'nested ml-0' : ''}`}
           style={{ marginLeft: depth > 0 ? '1rem' : '0' }}
         >
-          {wrapHeavy(280, () => (
-            <AsyncEditToolResultCard
-              toolMessage={toolMsg}
-              workspacePath={workspacePath}
-              onOpenFile={onOpenFile}
-              renderEmbeddedFile={renderEmbeddedFile}
-              canEmbedFile={canEmbedFile}
-              getToolCallDiffs={getToolCallDiffs}
-            />
-          ))}
+          <AsyncEditToolResultCard
+            toolMessage={toolMsg}
+            workspacePath={workspacePath}
+            onOpenFile={onOpenFile}
+            renderEmbeddedFile={renderEmbeddedFile}
+            canEmbedFile={canEmbedFile}
+            getToolCallDiffs={getToolCallDiffs}
+          />
         </div>
       );
     }
@@ -1826,16 +1662,14 @@ export const RichTranscriptView = React.forwardRef<
           className={`rich-transcript-tool-container mb-2 ${depth > 0 ? 'nested ml-0' : ''}`}
           style={{ marginLeft: depth > 0 ? '1rem' : '0' }}
         >
-          {wrapHeavy(280, () => (
-            <EditToolResultCard
-              toolMessage={toolMsg}
-              edits={editEntries}
-              workspacePath={workspacePath}
-              onOpenFile={onOpenFile}
-              renderEmbeddedFile={renderEmbeddedFile}
-              canEmbedFile={canEmbedFile}
-            />
-          ))}
+          <EditToolResultCard
+            toolMessage={toolMsg}
+            edits={editEntries}
+            workspacePath={workspacePath}
+            onOpenFile={onOpenFile}
+            renderEmbeddedFile={renderEmbeddedFile}
+            canEmbedFile={canEmbedFile}
+          />
         </div>
       );
     }
@@ -2075,11 +1909,9 @@ export const RichTranscriptView = React.forwardRef<
     );
   };
 
-  // Rendered message rows. Computed once and reused by both the VList path
-  // (iOS WKWebView) and the plain-DOM flat-list path (Chromium hosts).
-  // Each row's outer div carries `data-message-index` and registers its DOM
-  // node in `messageRefs` so imperative scroll and selection helpers work in
-  // both modes.
+  // Rendered message rows. Each row's outer div carries `data-message-index`
+  // and registers its DOM node in `messageRefs` so imperative scroll and
+  // selection helpers can find them.
   const renderedMessages = messages.map((message, index) => {
     const messageKey = getTranscriptMessageKey(sessionId, message, index);
     // Skip tool calls superseded by a later event with the same providerToolCallId
@@ -2410,11 +2242,7 @@ export const RichTranscriptView = React.forwardRef<
         containerRef={scrollContainerRef}
         onClose={() => setShowSearchBar(false)}
         onScrollToMessage={(index) => {
-          if (useVirtualization) {
-            vlistRef.current?.scrollToIndex(index, { align: 'center' });
-          } else {
-            messageRefs.current.get(index)?.scrollIntoView({ block: 'center', behavior: 'auto' });
-          }
+          vlistRef.current?.scrollToIndex(index, { align: 'center' });
         }}
       />
 
@@ -2456,9 +2284,9 @@ export const RichTranscriptView = React.forwardRef<
       {/* Messages */}
       <div
         ref={scrollContainerRef}
-        className={`rich-transcript-scroll-container flex-1 relative ${useVirtualization ? 'overflow-hidden' : 'flat overflow-y-auto overflow-x-hidden'}`}
+        className="rich-transcript-scroll-container flex-1 relative overflow-hidden"
       >
-        <div className={`rich-transcript-content mx-auto py-1 ${useVirtualization ? 'h-full' : ''} ${settings.compactMode ? 'compact' : 'normal'}`}>
+        <div className={`rich-transcript-content mx-auto py-1 h-full ${settings.compactMode ? 'compact' : 'normal'}`}>
           {messages.length === 0 && !isWaitingForResponse ? (
             <div className="rich-transcript-empty flex flex-col items-center p-8 px-4 h-full max-w-4xl mx-auto">
               <div className="rich-transcript-empty-content flex-1 flex flex-col justify-center max-w-[400px] text-left">
@@ -2476,13 +2304,12 @@ export const RichTranscriptView = React.forwardRef<
               </div>
               {renderEmptyExtra?.()}
             </div>
-          ) : useVirtualization && !isContainerVisible ? (
+          ) : !isContainerVisible ? (
             /* Skip VList rendering when container is hidden (display:none parent).
                VList with 0 height renders ALL items instead of virtualizing,
-               causing massive DOM bloat and style recalculation. The flat-list
-               path is unaffected by display:none (no virtualization to break). */
+               causing massive DOM bloat and style recalculation. */
             null
-          ) : useVirtualization ? (
+          ) : (
             <div className={`rich-transcript-messages rich-transcript-messages-wrapper flex flex-col max-w-full overflow-x-hidden h-full ${isScrollReady ? 'scroll-ready' : ''}`}>
               <VList
                   ref={vlistRef}
@@ -2545,35 +2372,6 @@ export const RichTranscriptView = React.forwardRef<
                   )}
               </VList>
             </div>
-          ) : (
-            <div className={`rich-transcript-messages rich-transcript-messages-wrapper flex flex-col max-w-full overflow-x-hidden ${isScrollReady ? 'scroll-ready' : ''}`}>
-              <div ref={flatListRef} className="rich-transcript-flat-list">
-                {renderedMessages}
-                {restartAtBottom && (
-                  <div key="restart-bottom" className="flex items-center gap-3 my-2 px-3">
-                    <div className="flex-1 h-px bg-[var(--nim-error)]" />
-                    <span className="text-[11px] font-medium text-[var(--nim-error)] whitespace-nowrap">
-                      Nimbalyst restarted {formatMessageTime(appStartTime!)}
-                    </span>
-                    <div className="flex-1 h-px bg-[var(--nim-error)]" />
-                  </div>
-                )}
-                {isWaitingForResponse && (
-                  <div key="waiting" className="rich-transcript-waiting flex items-center gap-2 text-[var(--nim-text-muted)] italic py-2 px-4 mb-2">
-                    <div className="rich-transcript-waiting-dots flex gap-1">
-                      <div className="rich-transcript-waiting-dot w-2 h-2 rounded-full bg-[var(--nim-primary)]" />
-                      <div className="rich-transcript-waiting-dot w-2 h-2 rounded-full bg-[var(--nim-primary)]" />
-                      <div className="rich-transcript-waiting-dot w-2 h-2 rounded-full bg-[var(--nim-primary)]" />
-                    </div>
-                    <span className="rich-transcript-waiting-text">{waitingText}</span>
-                  </div>
-                )}
-                {/* Zero-height bottom sentinel. scrollIntoView({ block: 'end' })
-                    on this is a reliable way to scroll the container to the
-                    very bottom regardless of any async layout settling. */}
-                <div ref={flatBottomSentinelRef} aria-hidden="true" style={{ height: 0 }} />
-              </div>
-            </div>
           )}
         </div>
 
@@ -2583,11 +2381,7 @@ export const RichTranscriptView = React.forwardRef<
             <button
               onClick={() => {
                 const targetIdx = pendingPermissionIndices[0];
-                if (useVirtualization) {
-                  vlistRef.current?.scrollToIndex(targetIdx, { align: 'center' });
-                } else {
-                  messageRefs.current.get(targetIdx)?.scrollIntoView({ block: 'center', behavior: 'auto' });
-                }
+                vlistRef.current?.scrollToIndex(targetIdx, { align: 'center' });
               }}
               className="pointer-events-auto flex items-center gap-2 px-4 py-2 bg-[var(--nim-primary)] text-white rounded-full shadow-lg text-sm font-medium cursor-pointer border-none transition-all hover:brightness-110"
             >

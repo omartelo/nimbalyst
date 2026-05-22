@@ -142,12 +142,15 @@ import { AnalyticsService } from "./services/analytics/AnalyticsService.ts";
 import { registerAnalyticsHandlers } from "./ipc/AnalyticsHandlers.ts";
 import { registerFeatureUsageHandlers } from "./ipc/FeatureUsageHandlers.ts";
 import { FeatureUsageService, FEATURES } from "./services/FeatureUsageService.ts";
-import { shutdownStytchAuth, handleAuthCallback } from './services/StytchAuthService';
+import { shutdownStytchAuth, handleAuthCallback, isAuthenticated } from './services/StytchAuthService';
 import { registerTrackerSyncHandlers, initializeTrackerSync } from './services/TrackerSyncManager';
 import { initTrackerSchemaService, updateTrackerSchemaWorkspace } from './services/TrackerSchemaService';
-import { registerTeamHandlers, autoMatchTeamForWorkspace, getOrgScopedJwt } from './services/TeamService';
+import { registerTeamHandlers, autoMatchTeamForWorkspace, getOrgScopedJwt, findTeamForWorkspace } from './services/TeamService';
+import { windowStates, windows, resolveActiveWorkspacePath } from './window/windowState';
+import { getRecentItems } from './utils/store';
 import { registerOrgKeyHandlers, getOrgKey } from './services/OrgKeyService';
 import { registerDocumentSyncHandlers } from './ipc/DocumentSyncHandlers';
+import { registerCollabV3TestHandlers } from './ipc/CollabV3TestHandlers';
 import { getPermissionService } from './services/PermissionService';
 import { ClaudeSettingsManager } from './services/ClaudeSettingsManager';
 import { TrayManager } from './tray/TrayManager';
@@ -559,7 +562,7 @@ if (!allowMultipleInstances) {
             // On Windows the protocol URL is passed as the last argument
             const deepLinkUrl = argv.find(arg => arg.startsWith('nimbalyst://'));
             if (deepLinkUrl) {
-                logger.main.info(`[SingleInstance] Found deep link in argv: ${deepLinkUrl}`);
+                logger.main.info('[SingleInstance] Found deep link in argv:', summarizeDeepLink(deepLinkUrl));
                 handleDeepLink(deepLinkUrl);
             }
 
@@ -640,10 +643,64 @@ if (!allowMultipleInstances) {
 // Track pending deep link URL
 let pendingDeepLinkUrl: string | null = null;
 
+// Per-workspace queue of shared-document deep links waiting for the renderer
+// to be ready (e.g., a window we just created for the project). Drained via
+// the `deep-link:consume-pending-shared-doc` IPC during listener init.
+const pendingSharedDocLinks = new Map<string, { documentId: string; orgId: string }>();
+
+safeHandle('deep-link:consume-pending-shared-doc', (_event, workspacePath: string) => {
+    if (!workspacePath) return null;
+    const pending = pendingSharedDocLinks.get(workspacePath);
+    if (!pending) return null;
+    pendingSharedDocLinks.delete(workspacePath);
+    return { ...pending, workspacePath };
+});
+
+// Same pattern for tracker deep links: nimbalyst://tracker/{trackerId}?orgId=...
+const pendingTrackerLinks = new Map<string, { trackerId: string; orgId: string }>();
+
+safeHandle('deep-link:consume-pending-tracker', (_event, workspacePath: string) => {
+    if (!workspacePath) return null;
+    const pending = pendingTrackerLinks.get(workspacePath);
+    if (!pending) return null;
+    pendingTrackerLinks.delete(workspacePath);
+    return { ...pending, workspacePath };
+});
+
+// Sensitive query params that must not be logged verbatim. Anything not in
+// this set is logged as-is so worker-supplied error codes/messages are visible.
+const SENSITIVE_DEEP_LINK_PARAMS = new Set([
+    'session_token',
+    'session_jwt',
+    'token',
+    'stytch_token',
+    'oauth_state',
+    'state',
+]);
+
+/**
+ * Summarize a deep-link URL for logging. Keeps host/pathname intact, replaces
+ * any sensitive param value with `[redacted:N]` (length only), and passes
+ * everything else through. Worker error codes (`error`, `error_description`,
+ * `stytch_error_type`) end up logged verbatim so a failed sign-in is diagnosable.
+ */
+function summarizeDeepLink(url: string): { host: string; pathname: string; params: Record<string, string> } | { rawUrl: string; parseError: string } {
+    try {
+        const parsed = new URL(url);
+        const params: Record<string, string> = {};
+        for (const [key, value] of parsed.searchParams.entries()) {
+            params[key] = SENSITIVE_DEEP_LINK_PARAMS.has(key) ? `[redacted:${value.length}]` : value;
+        }
+        return { host: parsed.host, pathname: parsed.pathname, params };
+    } catch (err) {
+        return { rawUrl: url, parseError: String(err) };
+    }
+}
+
 // Handle deep link URLs (nimbalyst://...)
 app.on('open-url', (event, url) => {
     event.preventDefault();
-    logger.main.info(`open-url event received: ${url}`);
+    logger.main.info('[DeepLink] open-url event:', summarizeDeepLink(url));
 
     if (app.isReady()) {
         handleDeepLink(url);
@@ -665,6 +722,24 @@ async function handleDeepLink(url: string): Promise<void> {
             const userId = parsed.searchParams.get('user_id');
             const email = parsed.searchParams.get('email');
             const expiresAt = parsed.searchParams.get('expires_at');
+
+            // Surface any worker-supplied error indicators before checking for
+            // session_token. The collabv3 worker may redirect back with
+            // `?error=...&error_description=...` instead of a session, and
+            // until now we silently fell into the "missing session_token"
+            // branch with no clue why.
+            const errorCode = parsed.searchParams.get('error');
+            const errorDescription = parsed.searchParams.get('error_description');
+            const stytchErrorType = parsed.searchParams.get('stytch_error_type');
+            if (errorCode || errorDescription || stytchErrorType) {
+                logger.main.error('[DeepLink] Auth callback returned error from server:', {
+                    error: errorCode,
+                    errorDescription,
+                    stytchErrorType,
+                    allParams: summarizeDeepLink(url),
+                });
+                return;
+            }
 
             if (sessionToken) {
                 const orgId = parsed.searchParams.get('org_id');
@@ -702,7 +777,9 @@ async function handleDeepLink(url: string): Promise<void> {
                     logger.main.error('[DeepLink] Failed to reinitialize sync after auth:', syncError);
                 }
             } else {
-                logger.main.error('[DeepLink] Auth callback missing session_token');
+                // No session_token and no recognized error param -- log everything
+                // we got so the worker's actual response shape is visible.
+                logger.main.error('[DeepLink] Auth callback missing session_token; full params:', summarizeDeepLink(url));
             }
         } else if (parsed.host === 'install' || parsed.pathname?.startsWith('/install/')) {
             // Handle extension install: nimbalyst://install/com.nimbalyst.excalidraw
@@ -716,12 +793,170 @@ async function handleDeepLink(url: string): Promise<void> {
             } else {
                 logger.main.warn('[DeepLink] Extension install missing extension ID');
             }
+        } else if (parsed.host === 'doc' || parsed.pathname?.startsWith('/doc/')) {
+            // Handle shared document link: nimbalyst://doc/{documentId}?orgId={orgId}
+            const encoded = parsed.host === 'doc'
+                ? parsed.pathname?.replace(/^\//, '')
+                : parsed.pathname?.replace('/doc/', '');
+            let documentId: string | undefined;
+            try {
+                documentId = encoded ? decodeURIComponent(encoded) : undefined;
+            } catch {
+                logger.main.warn('[DeepLink] Shared doc link has malformed documentId:', summarizeDeepLink(url));
+                return;
+            }
+            const orgId = parsed.searchParams.get('orgId');
+
+            if (!documentId || !orgId) {
+                logger.main.warn('[DeepLink] Shared doc link missing documentId or orgId:', summarizeDeepLink(url));
+                return;
+            }
+
+            await openSharedDocumentFromDeepLink(documentId, orgId);
+        } else if (parsed.host === 'tracker' || parsed.pathname?.startsWith('/tracker/')) {
+            // Handle tracker link: nimbalyst://tracker/{trackerId}?orgId={orgId}
+            const encoded = parsed.host === 'tracker'
+                ? parsed.pathname?.replace(/^\//, '')
+                : parsed.pathname?.replace('/tracker/', '');
+            let trackerId: string | undefined;
+            try {
+                trackerId = encoded ? decodeURIComponent(encoded) : undefined;
+            } catch {
+                logger.main.warn('[DeepLink] Tracker link has malformed trackerId:', summarizeDeepLink(url));
+                return;
+            }
+            const orgId = parsed.searchParams.get('orgId');
+
+            if (!trackerId || !orgId) {
+                logger.main.warn('[DeepLink] Tracker link missing trackerId or orgId:', summarizeDeepLink(url));
+                return;
+            }
+
+            await openTrackerFromDeepLink(trackerId, orgId);
         } else {
-            logger.main.warn(`[DeepLink] Unknown deep link: ${url}`);
+            logger.main.warn('[DeepLink] Unknown deep link:', summarizeDeepLink(url));
         }
     } catch (error) {
         logger.main.error('[DeepLink] Failed to handle deep link:', error);
     }
+}
+
+/**
+ * Find a workspace path whose team matches the given orgId. Looks first
+ * across all open windows (active + rail-warm), then falls back to the
+ * user's recent workspaces. Returns null if no known workspace matches.
+ */
+async function findWorkspaceForOrgId(orgId: string): Promise<string | null> {
+    const seen = new Set<string>();
+
+    // Open windows first — both active and rail-warm paths.
+    for (const state of windowStates.values()) {
+        const paths = new Set<string>();
+        const active = resolveActiveWorkspacePath(state);
+        if (active) paths.add(active);
+        if (state?.workspacePath) paths.add(state.workspacePath);
+        for (const p of state?.additionalWorkspacePaths ?? []) paths.add(p);
+
+        for (const workspacePath of paths) {
+            if (seen.has(workspacePath)) continue;
+            seen.add(workspacePath);
+            const team = await findTeamForWorkspace(workspacePath);
+            if (team?.orgId === orgId) return workspacePath;
+        }
+    }
+
+    // Fall back to recent workspaces the user has opened before.
+    const recent = getRecentItems('workspaces');
+    for (const item of recent) {
+        if (seen.has(item.path)) continue;
+        seen.add(item.path);
+        const team = await findTeamForWorkspace(item.path);
+        if (team?.orgId === orgId) return item.path;
+    }
+
+    return null;
+}
+
+/**
+ * Route a shared-document deep link to the renderer holding the matching
+ * team workspace. Queues the payload in `pendingSharedDocLinks` so a freshly
+ * created window's renderer can drain it on listener init.
+ */
+async function openSharedDocumentFromDeepLink(documentId: string, orgId: string): Promise<void> {
+    const reason = !isAuthenticated() ? 'not-authenticated' : 'no-workspace';
+    const workspacePath = isAuthenticated() ? await findWorkspaceForOrgId(orgId) : null;
+
+    if (!workspacePath) {
+        logger.main.warn('[DeepLink] Cannot route shared doc:', { reason, orgId, documentId });
+        const fallback = getMostRecentlyFocusedWorkspaceWindow();
+        if (fallback) {
+            if (fallback.isMinimized()) fallback.restore();
+            fallback.focus();
+            fallback.webContents.send('deep-link:shared-document-not-available', { documentId, orgId, reason });
+        }
+        return;
+    }
+
+    // Queue first; the renderer drains by workspacePath on listener init.
+    // For an already-loaded window we also fire the live event below; the
+    // renderer treats it as idempotent against the pending queue.
+    pendingSharedDocLinks.set(workspacePath, { documentId, orgId });
+
+    const existing = findWindowByWorkspace(workspacePath);
+    if (existing && !existing.isDestroyed()) {
+        if (existing.isMinimized()) existing.restore();
+        existing.focus();
+        existing.webContents.send('deep-link:open-shared-document', {
+            documentId,
+            orgId,
+            workspacePath,
+        });
+        logger.main.info('[DeepLink] Routed shared doc to existing window:', { workspacePath, documentId });
+        return;
+    }
+
+    // No window has this workspace open — create one. The renderer's
+    // deep-link listener will drain the pending queue once it mounts.
+    logger.main.info('[DeepLink] Opening new window for shared doc workspace:', { workspacePath, documentId });
+    createWindow(false, true, workspacePath);
+}
+
+/**
+ * Route a tracker deep link to the matching team workspace. Mirrors the
+ * shared-document flow, but targets tracker mode + tracker-item selection.
+ */
+async function openTrackerFromDeepLink(trackerId: string, orgId: string): Promise<void> {
+    const reason = !isAuthenticated() ? 'not-authenticated' : 'no-workspace';
+    const workspacePath = isAuthenticated() ? await findWorkspaceForOrgId(orgId) : null;
+
+    if (!workspacePath) {
+        logger.main.warn('[DeepLink] Cannot route tracker:', { reason, orgId, trackerId });
+        const fallback = getMostRecentlyFocusedWorkspaceWindow();
+        if (fallback) {
+            if (fallback.isMinimized()) fallback.restore();
+            fallback.focus();
+            fallback.webContents.send('deep-link:tracker-not-available', { trackerId, orgId, reason });
+        }
+        return;
+    }
+
+    pendingTrackerLinks.set(workspacePath, { trackerId, orgId });
+
+    const existing = findWindowByWorkspace(workspacePath);
+    if (existing && !existing.isDestroyed()) {
+        if (existing.isMinimized()) existing.restore();
+        existing.focus();
+        existing.webContents.send('deep-link:open-tracker', {
+            trackerId,
+            orgId,
+            workspacePath,
+        });
+        logger.main.info('[DeepLink] Routed tracker to existing window:', { workspacePath, trackerId });
+        return;
+    }
+
+    logger.main.info('[DeepLink] Opening new window for tracker workspace:', { workspacePath, trackerId });
+    createWindow(false, true, workspacePath);
 }
 
 // Handle file open from OS (macOS)
@@ -1160,6 +1395,7 @@ app.whenReady().then(async () => {
     registerTeamHandlers();
     registerOrgKeyHandlers();
     registerDocumentSyncHandlers();
+    registerCollabV3TestHandlers();
     markEnd('ipc-handlers');
 
     // Initialize system tray for session status visibility

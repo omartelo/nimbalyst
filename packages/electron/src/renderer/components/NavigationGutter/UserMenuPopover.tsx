@@ -1,19 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
+import { useAtomValue } from 'jotai';
 import { MaterialSymbol } from '@nimbalyst/runtime';
 import { useAlphaFeature } from '../../hooks/useAlphaFeature';
 import type { SettingsCategory } from '../Settings/SettingsSidebar';
 import type { SettingsScope } from '../Settings/SettingsView';
 import { useFloatingMenu, FloatingPortal } from '../../hooks/useFloatingMenu';
 import { AlphaBadge } from '../common/AlphaBadge';
-
-interface StytchAuthState {
-  isAuthenticated: boolean;
-  user: {
-    user_id: string;
-    emails: Array<{ email: string }>;
-    name?: { first_name?: string; last_name?: string };
-  } | null;
-}
+import { stytchAuthAtom } from '../../store/atoms/stytchAuth';
 
 interface UserMenuPopoverProps {
   onNavigateSettings: (scope: SettingsScope, category?: SettingsCategory) => void;
@@ -25,7 +18,7 @@ interface UserMenuPopoverProps {
 }
 
 export function UserMenuPopover({ onNavigateSettings, onClose, isProjectConnected = false, anchorEl }: UserMenuPopoverProps) {
-  const [authState, setAuthState] = useState<StytchAuthState | null>(null);
+  const authState = useAtomValue(stytchAuthAtom);
 
   const menu = useFloatingMenu({
     placement: 'right-end',
@@ -39,33 +32,6 @@ export function UserMenuPopover({ onNavigateSettings, onClose, isProjectConnecte
       menu.refs.setReference(anchorEl);
     }
   }, [anchorEl, menu.refs]);
-
-  // Load auth state on mount
-  useEffect(() => {
-    async function loadAuth() {
-      if (!window.electronAPI?.stytch) return;
-      try {
-        const state = await window.electronAPI.stytch.getAuthState();
-        setAuthState({
-          isAuthenticated: state.isAuthenticated,
-          user: state.user,
-        });
-      } catch (err) {
-        console.warn('[UserMenuPopover] Failed to load auth state:', err);
-      }
-    }
-    loadAuth();
-
-    // Subscribe to auth state changes
-    const unsubscribe = window.electronAPI?.stytch?.onAuthStateChange?.((state: any) => {
-      setAuthState({
-        isAuthenticated: state.isAuthenticated,
-        user: state.user,
-      });
-    });
-
-    return () => { unsubscribe?.(); };
-  }, []);
 
   const isCollaborationEnabled = useAlphaFeature('collaboration');
   const email = authState?.user?.emails?.[0]?.email;

@@ -40,6 +40,7 @@ describe('extractFilePathsFromCommand', () => {
   let nestedDir: string;
   let realFile: string;
   let realFileRel: string;
+  let excludedBuildFile: string;
 
   beforeAll(async () => {
     // Realpath the workspace root so the boundary check (which compares
@@ -52,6 +53,10 @@ describe('extractFilePathsFromCommand', () => {
     realFile = path.join(nestedDir, 'file.ts');
     await fs.promises.writeFile(realFile, 'export const a = 1;\n');
     realFileRel = path.relative(workspaceRoot, realFile);
+    const excludedBuildDir = path.join(workspaceRoot, 'packages', 'ios', 'NimbalystNative', '.build');
+    await fs.promises.mkdir(excludedBuildDir, { recursive: true });
+    excludedBuildFile = path.join(excludedBuildDir, 'artifact.d');
+    await fs.promises.writeFile(excludedBuildFile, 'deps: artifact\n');
   });
 
   afterAll(async () => {
@@ -135,6 +140,15 @@ describe('extractFilePathsFromCommand', () => {
     const ghost = path.join(workspaceRoot, 'does', 'not', 'exist.ts');
     const result = await extractFilePathsFromCommand(
       `cat ${ghost}`,
+      workspaceRoot,
+      workspaceRoot,
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('skips files inside excluded build artifact directories', async () => {
+    const result = await extractFilePathsFromCommand(
+      `cat ${excludedBuildFile}`,
       workspaceRoot,
       workspaceRoot,
     );

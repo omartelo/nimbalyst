@@ -17,6 +17,7 @@ import { logger } from '../utils/logger';
 import { startFileWatcher } from '../file/FileWatcher';
 import { addGitignoreBypass } from '../file/WorkspaceEventBus';
 import { documentServices } from '../window/WindowManager';
+import { sessionEditQuota } from './SessionEditQuota';
 import { extractFilePath } from './ai/tools/extractFilePath';
 
 /**
@@ -344,6 +345,13 @@ export class SessionFileTracker {
           }
           this.recentEdits.delete(dedupeKey);
         }
+      }
+
+      // Hard cap per session: once a session has touched 500 distinct files
+      // as `edited`, suppress further attribution. Read/referenced links are
+      // cheap and not part of the saturation problem, so they're not capped.
+      if (linkType === 'edited' && !(await sessionEditQuota.tryReserve(sessionId, filePath))) {
+        return;
       }
 
       // Register gitignore bypass for edited files so watcher events fire

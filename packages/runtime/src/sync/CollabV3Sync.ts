@@ -186,6 +186,7 @@ type DecryptedSessionIndexEntry = Omit<SessionIndexEntry, 'title' | 'encryptedTi
   projectId: string;  // Decrypted project ID
   queuedPrompts?: PlaintextQueuedPrompt[];  // Decrypted queued prompts
   currentContext?: { tokens: number; contextWindow: number };  // Decrypted from client metadata
+  hasBeenNamed?: boolean;  // Decrypted from client metadata
 };
 
 /** Encrypted create session request for wire protocol */
@@ -511,24 +512,31 @@ interface ClientMetadata {
   draftInput?: string;
   /** Epoch ms when draftInput was last updated by the sending device */
   draftUpdatedAt?: number;
+  /** Marker that the title was AI-chosen; prevents repeated rename attempts. */
+  hasBeenNamed?: boolean;
 }
 
 /**
  * Extract ClientMetadata from raw PGLite metadata.
  * This is the single place that maps database schema -> encrypted client metadata.
  */
-function buildClientMetadataFromRaw(metadata?: Record<string, any>): ClientMetadata | undefined {
+function buildClientMetadataFromRaw(
+  metadata?: Record<string, any>,
+  options: { hasBeenNamed?: boolean } = {}
+): ClientMetadata | undefined {
   const tokenUsage = metadata?.tokenUsage;
   const phase = metadata?.phase as string | undefined;
   const tags = metadata?.tags as string[] | undefined;
   const draftInput = metadata?.draftInput as string | undefined;
   const draftUpdatedAt = metadata?.draftUpdatedAt as number | undefined;
+  const hasBeenNamed = options.hasBeenNamed;
   const hasTokenUsage = tokenUsage?.totalTokens && tokenUsage?.contextWindow;
   const hasPhaseOrTags = phase || (tags && tags.length > 0);
   // draftInput can be "" (explicit clear) - treat as meaningful
   const hasDraftField = draftInput !== undefined;
+  const hasNamingMarker = hasBeenNamed !== undefined;
 
-  if (!hasTokenUsage && !hasPhaseOrTags && !hasDraftField) return undefined;
+  if (!hasTokenUsage && !hasPhaseOrTags && !hasDraftField && !hasNamingMarker) return undefined;
 
   const result: ClientMetadata = {};
   if (hasTokenUsage) {
@@ -541,6 +549,7 @@ function buildClientMetadataFromRaw(metadata?: Record<string, any>): ClientMetad
   if (tags && tags.length > 0) result.tags = tags;
   if (hasDraftField) result.draftInput = draftInput;
   if (draftUpdatedAt) result.draftUpdatedAt = draftUpdatedAt;
+  if (hasNamingMarker) result.hasBeenNamed = hasBeenNamed;
   return result;
 }
 
@@ -731,6 +740,8 @@ interface CachedSessionIndex {
   draftInput?: string;
   /** Epoch ms when draftInput was last updated by the sending device */
   draftUpdatedAt?: number;
+  /** Marker that the title was AI-chosen; prevents repeated rename attempts. */
+  hasBeenNamed?: boolean;
 }
 
 // ============================================================================
@@ -765,21 +776,36 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
     if (config.userId && jwtUserId !== config.userId) {
       const jwtIsTeamScoped =
         !!claims.organization_id && !!config.orgId && claims.organization_id !== config.orgId;
-      console.warn(
-        '[CollabV3] JWT sub does not match sync config userId -- server will reject the WebSocket auth.',
-        {
-          jwtSub: jwtUserId,
-          jwtOrgId: claims.organization_id ?? null,
-          configUserId: config.userId, // personalUserId from SyncManager
-          configOrgId: config.orgId,   // personalOrgId from SyncManager
-          likelyCause: jwtIsTeamScoped
-            ? 'JWT is team-scoped (organization_id differs from personal orgId). getJwt() should return a personal-org-scoped JWT -- check StytchAuthService.refreshPersonalSession / getPersonalSessionJwt.'
-            : 'JWT and config disagree on the user ID. The persisted personalUserId is likely stale (e.g. saved as a team member ID before resolvePersonalUserId ran). Check StytchAuthService.resolvePersonalUserId and the persisted session-sync config.',
-        },
-      );
+      // Rate-limit: this used to log every 2s forever once the loop kicked in.
+      const now = Date.now();
+      if (now - lastJwtMismatchLogAt > JWT_MISMATCH_LOG_INTERVAL_MS) {
+        lastJwtMismatchLogAt = now;
+        console.warn(
+          '[CollabV3] JWT sub does not match sync config userId -- refusing to connect (would be server-rejected and throttle the client).',
+          {
+            jwtSub: jwtUserId,
+            jwtOrgId: claims.organization_id ?? null,
+            configUserId: config.userId, // personalUserId from SyncManager
+            configOrgId: config.orgId,   // personalOrgId from SyncManager
+            likelyCause: jwtIsTeamScoped
+              ? 'JWT is team-scoped (organization_id differs from personal orgId). getJwt() should return a personal-org-scoped JWT -- check StytchAuthService.refreshPersonalSession / getPersonalSessionJwt.'
+              : 'JWT and config disagree on the user ID. The persisted personalUserId is likely stale (e.g. saved as a team member ID before resolvePersonalUserId ran). Check StytchAuthService.resolvePersonalUserId and the persisted session-sync config.',
+          },
+        );
+      }
+      // Don't even attempt the connection -- the server will reject it and the
+      // tight retry loop got us throttled in the past. Caller will set
+      // `indexAuthBlocked` and stop scheduling reconnects.
+      const err = new Error('CollabV3 JWT/userId mismatch -- connection refused locally to avoid server throttling');
+      (err as any).code = 'AUTH_MISMATCH';
+      throw err;
     }
     currentUserId = config.userId || jwtUserId;
     return { jwt, userId: currentUserId };
+  }
+
+  function isAuthMismatchError(err: unknown): boolean {
+    return !!err && typeof err === 'object' && (err as any).code === 'AUTH_MISMATCH';
   }
 
   // Get user ID synchronously if we have a cached JWT, otherwise use config.userId
@@ -814,7 +840,31 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
   let deviceAnnounceInterval: ReturnType<typeof setInterval> | null = null;
   let pingInterval: ReturnType<typeof setInterval> | null = null;
   let indexReconnectAttempts = 0;
+  /**
+   * Count of consecutive pre-open failures (WebSocket created but never reached
+   * `onopen`). Distinct from `indexReconnectAttempts` so we can keep the first
+   * few retries fast (handles legitimate "network just came up" races) while
+   * still ramping into a real backoff if the failures keep coming. Without this,
+   * a permanent server-side rejection (e.g. JWT/userId mismatch) used to hammer
+   * the server at 2s forever and get us throttled.
+   */
+  let indexPreOpenFailures = 0;
   let indexReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * When `ensureFreshJwt` detects that the JWT cannot possibly succeed against
+   * the configured room (JWT `sub` does not match `config.userId`), we set this
+   * flag and stop scheduling reconnects entirely. The server would only reject
+   * us anyway, and repeated rejections get the client IP throttled. Cleared by
+   * an explicit `reconnectIndex()` (network change / user toggles sync / app
+   * regains focus) so a refreshed JWT gets a chance to retry.
+   */
+  let indexAuthBlocked = false;
+  /**
+   * Rate-limit identical JWT-mismatch warnings. Without this we log the same
+   * `[object Object]` warning every 2 seconds forever.
+   */
+  let lastJwtMismatchLogAt = 0;
+  const JWT_MISMATCH_LOG_INTERVAL_MS = 60_000;
 
   function clearIndexReady(): void {
     indexReady = false;
@@ -860,31 +910,57 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
   /**
    * Schedule a reconnect attempt for the index WebSocket with exponential backoff.
    *
-   * `preOpenFailure: true` keeps the backoff flat at the base delay (2s) rather
-   * than incrementing the attempts counter. Rationale: if the WS never reached
-   * `onopen`, the network probably isn't actually up yet (e.g. fresh from sleep,
-   * DHCP still in progress). Bumping the backoff pushes us into the 30s cap
-   * where we spend minutes in "dead but pretending" state. Staying at 2s lets
-   * us recover within a couple of seconds of the network actually coming up.
+   * Backoff schedule:
+   *   - mid-connection drops (server closed an open WS): exponential 2s, 4s, 8s,
+   *     16s, 30s cap.
+   *   - pre-open failures (WS never reached `onopen`): the first 3 attempts stay
+   *     flat at 2s -- handles the legitimate "OS network just came up, DHCP
+   *     still in progress" race. After that we ramp 5s, 10s, 30s, 60s, 120s,
+   *     up to a 5-minute cap. Without this ramp a permanent server-side
+   *     rejection (e.g. stale JWT) would hammer the server at 2s forever and
+   *     get the client throttled.
+   *
+   * If `indexAuthBlocked` is set (JWT/userId mismatch detected), we don't
+   * schedule a reconnect at all. Recovery happens only via an explicit
+   * `reconnectIndex()` call (network change, user toggles sync, app focus).
    */
   function scheduleIndexReconnect(options?: { preOpenFailure?: boolean }): void {
+    if (indexAuthBlocked) {
+      // Don't keep hammering a connection the server will hard-reject. Wait for
+      // an explicit reconnect trigger that resets indexAuthBlocked.
+      return;
+    }
+
     const preOpenFailure = options?.preOpenFailure ?? false;
-    // Exponential backoff: 2s, 4s, 8s, 16s, 30s max -- for true mid-connection
-    // drops. For pre-open failures we stay at the base 2s.
-    const delay = preOpenFailure
-      ? 2000
-      : Math.min(2000 * Math.pow(2, indexReconnectAttempts), 30000);
-    if (!preOpenFailure) {
+    let delay: number;
+    if (preOpenFailure) {
+      indexPreOpenFailures++;
+      if (indexPreOpenFailures <= 3) {
+        delay = 2000; // fast retries for transient network-coming-up race
+      } else {
+        // Ramp: 5s, 10s, 30s, 60s, 120s, 300s cap.
+        const ramp = [5_000, 10_000, 30_000, 60_000, 120_000, 300_000];
+        const idx = Math.min(indexPreOpenFailures - 4, ramp.length - 1);
+        delay = ramp[idx];
+      }
+    } else {
+      delay = Math.min(2000 * Math.pow(2, indexReconnectAttempts), 30000);
       indexReconnectAttempts++;
     }
-    console.log(`[CollabV3] Scheduling index reconnect attempt ${indexReconnectAttempts}${preOpenFailure ? ' (pre-open, flat backoff)' : ''} in ${delay}ms`);
+    console.log(`[CollabV3] Scheduling index reconnect attempt ${indexReconnectAttempts}${preOpenFailure ? ` (pre-open #${indexPreOpenFailures})` : ''} in ${delay}ms`);
 
     if (indexReconnectTimer) clearTimeout(indexReconnectTimer);
     indexReconnectTimer = setTimeout(() => {
       indexReconnectTimer = null;
+      if (indexAuthBlocked) return;
       if (!indexWs && !indexConnected) {
         console.log('[CollabV3] Attempting to reconnect to index...');
         connectToIndex().catch(err => {
+          if (isAuthMismatchError(err)) {
+            // ensureFreshJwt already set indexAuthBlocked. Do not reschedule.
+            console.warn('[CollabV3] Index reconnect blocked: JWT/userId mismatch. Waiting for explicit reconnect trigger.');
+            return;
+          }
           console.error('[CollabV3] Failed to reconnect to index:', err);
           // Schedule another attempt - connectToIndex() may have failed before
           // creating a WebSocket (e.g. JWT refresh failed), so onclose won't fire
@@ -965,7 +1041,11 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       provider: cached.provider,
       model: cached.model,
       mode: cached.mode,
+      sessionType: 'sessionType' in pending ? pending.sessionType : cached.sessionType,
+      parentSessionId: 'parentSessionId' in pending ? pending.parentSessionId : cached.parentSessionId,
+      worktreeId: 'worktreeId' in pending ? pending.worktreeId : cached.worktreeId,
       isArchived: 'isArchived' in pending ? pending.isArchived : cached.isArchived,
+      isPinned: 'isPinned' in pending ? pending.isPinned : cached.isPinned,
       messageCount: cached.messageCount,
       lastMessageAt: cached.lastMessageAt,
       createdAt: cached.createdAt,
@@ -974,8 +1054,11 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       isExecuting: 'isExecuting' in pending ? pending.isExecuting : cached.isExecuting,
       currentContext: 'currentContext' in pending ? pending.currentContext : cached.currentContext,
       hasPendingPrompt: 'hasPendingPrompt' in pending ? pending.hasPendingPrompt : cached.hasPendingPrompt,
+      phase: 'phase' in pending ? (pending as any).phase : cached.phase,
+      tags: 'tags' in pending ? (pending as any).tags : cached.tags,
       draftInput: 'draftInput' in pending ? (pending as any).draftInput : cached.draftInput,
       draftUpdatedAt: 'draftUpdatedAt' in pending ? (pending as any).draftUpdatedAt : cached.draftUpdatedAt,
+      hasBeenNamed: 'hasBeenNamed' in pending ? (pending as any).hasBeenNamed : cached.hasBeenNamed,
     };
 
     // Update cache with decrypted values
@@ -1000,7 +1083,9 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       mode: updatedCache.mode,
       sessionType: updatedCache.sessionType,
       parentSessionId: updatedCache.parentSessionId,
+      worktreeId: updatedCache.worktreeId,
       isArchived: updatedCache.isArchived,
+      isPinned: updatedCache.isPinned,
       messageCount: updatedCache.messageCount,
       lastMessageAt: updatedCache.lastMessageAt,
       createdAt: updatedCache.createdAt,
@@ -1017,7 +1102,14 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
     }
 
     // Encrypt client metadata (context usage, pending prompt state, phase, tags, draft, etc.)
-    if (updatedCache.currentContext || updatedCache.hasPendingPrompt !== undefined || updatedCache.phase || updatedCache.tags || updatedCache.draftInput !== undefined) {
+    if (
+      updatedCache.currentContext ||
+      updatedCache.hasPendingPrompt !== undefined ||
+      updatedCache.phase ||
+      updatedCache.tags ||
+      updatedCache.draftInput !== undefined ||
+      updatedCache.hasBeenNamed !== undefined
+    ) {
       const clientMeta: ClientMetadata = {
         currentContext: updatedCache.currentContext,
         hasPendingPrompt: updatedCache.hasPendingPrompt,
@@ -1025,6 +1117,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
         tags: updatedCache.tags,
         draftInput: updatedCache.draftInput,
         draftUpdatedAt: updatedCache.draftUpdatedAt,
+        hasBeenNamed: updatedCache.hasBeenNamed,
       };
       const { encryptedClientMetadata, clientMetadataIv } = await encryptClientMetadata(clientMeta, config.encryptionKey);
       indexEntry.encryptedClientMetadata = encryptedClientMetadata;
@@ -1430,6 +1523,14 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       return;
     }
 
+    if (indexAuthBlocked) {
+      // Auth is known-bad; throwing here lets callers (e.g. ad-hoc
+      // sendSessionControlMessage) skip work that would never succeed.
+      const err = new Error('CollabV3 index connection blocked: JWT/userId mismatch');
+      (err as any).code = 'AUTH_MISMATCH';
+      throw err;
+    }
+
     // Clean up zombie WebSocket: created but never connected (or connection dropped
     // silently). Without this, we'd return early and never establish a fresh connection.
     if (indexWs && !indexConnected) {
@@ -1442,8 +1543,21 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       indexWs = null;
     }
 
-    // Get fresh JWT before connecting
-    const { jwt } = await ensureFreshJwt();
+    // Get fresh JWT before connecting. Throws AUTH_MISMATCH if the JWT cannot
+    // succeed against the configured room (caught below to set indexAuthBlocked).
+    let jwt: string;
+    try {
+      ({ jwt } = await ensureFreshJwt());
+    } catch (err) {
+      if (isAuthMismatchError(err)) {
+        indexAuthBlocked = true;
+        if (indexReconnectTimer) {
+          clearTimeout(indexReconnectTimer);
+          indexReconnectTimer = null;
+        }
+      }
+      throw err;
+    }
 
     const indexRoomId = getIndexRoomId();
     console.log('[CollabV3] connectToIndex() roomId:', indexRoomId, 'orgId:', config.orgId, 'userId:', getUserId());
@@ -1467,6 +1581,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       reachedOpen = true;
       indexConnected = true;
       indexReconnectAttempts = 0;
+      indexPreOpenFailures = 0;
       // console.log('[CollabV3] Connected to index');
 
       // Send device announcement if device info is provided
@@ -1496,14 +1611,21 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       }, INDEX_STABILITY_MS);
     };
 
-    indexWs.onclose = () => {
+    indexWs.onclose = (event: CloseEvent) => {
       stopPingInterval();
       indexConnected = false;
       indexWs = null;
       clearIndexReady();
       stopDeviceAnnounceInterval();
 
-      console.log('[CollabV3] Disconnected from index');
+      // Server rejections (bad/expired JWT, policy violations) arrive as a
+      // close frame, not an error event. Log code/reason so auth failures
+      // aren't opaque next time. 1006 is a synthetic "abnormal closure"
+      // emitted by the WS client when the underlying socket dies; that's
+      // network/transport, not server policy.
+      console.log(
+        `[CollabV3] Disconnected from index (code=${event?.code ?? 'unknown'}, reason="${event?.reason ?? ''}", wasClean=${event?.wasClean ?? 'unknown'}, reachedOpen=${reachedOpen})`,
+      );
       // Pre-open failure: the network likely isn't actually up yet. Keep
       // reconnect attempts fast by not letting the failure bump the backoff
       // exponent. If we're in a flaky post-wake window we want to keep probing
@@ -1512,7 +1634,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
     };
 
     indexWs.onerror = (event) => {
-      // Note: ErrorEvent only exists in browser environments, not Node.js
+      // WS `onerror` carries almost no info -- the actionable signal (close
+      // code / reason) arrives on `onclose`, which always fires after error.
+      // Log a stable summary here and let `onclose` add the close-frame
+      // details so we never get the previous "[object Object]" placeholder.
       const errorInfo = typeof ErrorEvent !== 'undefined' && event instanceof ErrorEvent
         ? { message: event.message, error: event.error }
         : { type: event.type };
@@ -1592,6 +1717,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                   let tags: string[] | undefined;
                   let draftInput: string | undefined;
                   let draftUpdatedAt: number | undefined;
+                  let hasBeenNamed: boolean | undefined;
                   if (entry.encryptedClientMetadata && entry.clientMetadataIv && config.encryptionKey) {
                     try {
                       const clientMeta = await decryptClientMetadata(entry.encryptedClientMetadata, entry.clientMetadataIv, config.encryptionKey);
@@ -1601,6 +1727,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                       tags = clientMeta.tags;
                       draftInput = clientMeta.draftInput || undefined;
                       draftUpdatedAt = clientMeta.draftUpdatedAt;
+                      hasBeenNamed = clientMeta.hasBeenNamed;
                     } catch (err) {
                       // Non-fatal: metadata is supplementary, just skip
                       console.warn(`[CollabV3] Failed to decrypt client metadata for session ${entry.sessionId}, skipping`);
@@ -1663,6 +1790,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                     tags,
                     draftInput,
                     draftUpdatedAt,
+                    hasBeenNamed,
                     lastReadAt: decrypted.lastReadAt,
                   };
                   sessionIndexCache.set(entry.sessionId, cacheEntry);
@@ -1744,7 +1872,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
           case 'indexBroadcast': {
             // Another device updated a session - decrypt sensitive fields first
             const entry = message.session;
-            console.log('[CollabV3] DEBUG indexBroadcast received for session:', entry.sessionId, 'hasClientMeta:', !!entry.encryptedClientMetadata, 'fromConnectionId:', message.fromConnectionId);
+            // console.log('[CollabV3] DEBUG indexBroadcast received for session:', entry.sessionId, 'hasClientMeta:', !!entry.encryptedClientMetadata, 'fromConnectionId:', message.fromConnectionId);
 
             // Decrypt projectId - encrypted projectId is required
             let projectId: string;
@@ -1797,6 +1925,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                 // Allow empty string through so "clear draft" propagates to renderer
                 if (clientMeta.draftInput !== undefined) decryptedEntry.draftInput = clientMeta.draftInput;
                 if (clientMeta.draftUpdatedAt !== undefined) decryptedEntry.draftUpdatedAt = clientMeta.draftUpdatedAt;
+                if (clientMeta.hasBeenNamed !== undefined) decryptedEntry.hasBeenNamed = clientMeta.hasBeenNamed;
               } catch (err) {
                 console.error('[CollabV3] Failed to decrypt client metadata:', err);
               }
@@ -1823,11 +1952,11 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                 console.error('[CollabV3] Failed to decrypt index entry queued prompts:', err);
               }
             } else {
-              console.log('[CollabV3] DEBUG no encrypted prompts to decrypt:', {
-                hasEncryptedPrompts: !!entry.encryptedQueuedPrompts,
-                length: entry.encryptedQueuedPrompts?.length ?? 0,
-                hasEncryptionKey: !!config.encryptionKey,
-              });
+              // console.log('[CollabV3] DEBUG no encrypted prompts to decrypt:', {
+              //   hasEncryptedPrompts: !!entry.encryptedQueuedPrompts,
+              //   length: entry.encryptedQueuedPrompts?.length ?? 0,
+              //   hasEncryptionKey: !!config.encryptionKey,
+              // });
             }
             // If no encrypted prompts, queuedPrompts stays undefined
 
@@ -2079,8 +2208,20 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
   //   hasEncryptionKey: !!config.encryptionKey,
   // });
 
-  // Start index connection
-  connectToIndex();
+  // Start index connection. If the JWT mismatches the configured userId,
+  // ensureFreshJwt sets indexAuthBlocked and throws -- we swallow it here so we
+  // don't fire an unhandled promise rejection at startup. A later explicit
+  // reconnectIndex() (network change / settings update / auth refresh) will
+  // clear indexAuthBlocked and try again. Other errors fall through to the
+  // existing scheduleIndexReconnect path via the onclose handler.
+  connectToIndex().catch(err => {
+    if (isAuthMismatchError(err)) {
+      console.warn('[CollabV3] Initial index connect blocked: JWT/userId mismatch. Waiting for explicit reconnect trigger.');
+      return;
+    }
+    console.error('[CollabV3] Initial index connect failed:', err);
+    scheduleIndexReconnect({ preOpenFailure: true });
+  });
 
   // Sync messages to a session room (internal function)
   async function syncSessionMessages(
@@ -2314,7 +2455,9 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       }
 
       // Encrypt client metadata (context usage, pending prompt state, etc.)
-      const rawClientMeta = buildClientMetadataFromRaw(session.metadata);
+      const rawClientMeta = buildClientMetadataFromRaw(session.metadata, {
+        hasBeenNamed: session.hasBeenNamed,
+      });
       // Merge in cached hasPendingPrompt (transient state not stored in PGLite)
       const clientMeta: ClientMetadata | undefined = (rawClientMeta || cachedHasPendingPrompt !== undefined)
         ? { ...rawClientMeta, hasPendingPrompt: cachedHasPendingPrompt }
@@ -2353,6 +2496,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
         tags: clientMeta?.tags,
         draftInput: clientMeta?.draftInput,
         draftUpdatedAt: clientMeta?.draftUpdatedAt,
+        hasBeenNamed: clientMeta?.hasBeenNamed,
       };
       sessionIndexCache.set(session.id, cacheEntry);
 
@@ -2401,6 +2545,20 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
         return; // Already connected
       }
 
+      // Short-circuit when the JWT/userId mismatch latch is set. The server
+      // would reject any session WebSocket against this room, and an active
+      // agent streams ~10 messages/sec -- without this guard every message
+      // hit `ensureFreshJwt()`, threw AUTH_MISMATCH, and flooded main.log
+      // (1686/4986 lines during a single mobile-build session on 2026-05-21).
+      // The latch clears on reconnectIndex() / disconnectAll(), so legitimate
+      // signals (network change, settings update, auth refresh) still
+      // unblock subsequent connects.
+      if (indexAuthBlocked) {
+        const err = new Error('CollabV3 session connection blocked: JWT/userId mismatch');
+        (err as any).code = 'AUTH_MISMATCH';
+        throw err;
+      }
+
       // Enforce hard limit on concurrent connections - try to evict idle connection first
       if (sessions.size >= MAX_SESSION_CONNECTIONS) {
         // Find the oldest idle connection that exceeds the idle timeout
@@ -2434,8 +2592,21 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
       // const stack = new Error().stack?.split('\n').slice(2, 6).join('\n') || '';
       // console.log(`[CollabV3] connect() - CREATING NEW WebSocket for session ${sessionId} (${sessions.size + 1}/${MAX_SESSION_CONNECTIONS})\n${stack}`);
 
-      // Get fresh JWT before connecting
-      const { jwt } = await ensureFreshJwt();
+      // Get fresh JWT before connecting. If ensureFreshJwt throws
+      // AUTH_MISMATCH, set the latch so subsequent connect() calls
+      // short-circuit (defense in depth alongside the check above; this
+      // covers the case where the per-session connect() is the first
+      // sync call in the process and connectToIndex() hasn't latched
+      // yet).
+      let jwt: string;
+      try {
+        ({ jwt } = await ensureFreshJwt());
+      } catch (err) {
+        if (isAuthMismatchError(err)) {
+          indexAuthBlocked = true;
+        }
+        throw err;
+      }
 
       const roomId = getRoomId(sessionId);
       const url = getWebSocketUrl(roomId);
@@ -2474,14 +2645,20 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
           resolve();
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event: CloseEvent) => {
+          // Auth rejections (expired/invalid JWT) arrive here as a close
+          // frame, not as an error event. Logging code/reason makes the
+          // root cause visible the next time something goes wrong.
+          console.log(
+            `[CollabV3] Session WebSocket closed for ${sessionId} (code=${event?.code ?? 'unknown'}, reason="${event?.reason ?? ''}", wasClean=${event?.wasClean ?? 'unknown'})`,
+          );
           updateStatus(sessionId, { connected: false });
           sessions.delete(sessionId);
         };
 
         ws.onerror = (event) => {
-          // Extract useful error info from the event
-          // Note: ErrorEvent only exists in browser environments, not Node.js
+          // onerror itself carries little -- the close frame that follows has
+          // the actionable code/reason. Keep this log as a breadcrumb only.
           const errorInfo = typeof ErrorEvent !== 'undefined' && event instanceof ErrorEvent
             ? { message: event.message, error: event.error }
             : { type: event.type, target: (event.target as WebSocket)?.url };
@@ -2520,6 +2697,8 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
         indexReconnectTimer = null;
       }
       indexReconnectAttempts = 0;
+      indexPreOpenFailures = 0;
+      indexAuthBlocked = false;
       clearIndexReady();
       indexReadyListeners.clear();
       if (indexWs) {
@@ -2532,6 +2711,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
     isConnected(sessionId: string): boolean {
       const session = sessions.get(sessionId);
       return session?.status.connected ?? false;
+    },
+
+    isAuthMismatched(): boolean {
+      return indexAuthBlocked;
     },
 
     getStatus(sessionId: string): SyncStatus {
@@ -2634,7 +2817,8 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
             ('hasPendingPrompt' in change.metadata) ||
             ('phase' in change.metadata) ||
             ('tags' in change.metadata) ||
-            ('draftInput' in change.metadata);
+            ('draftInput' in change.metadata) ||
+            ('hasBeenNamed' in change.metadata);
           if (hasClientMetaFields && config.encryptionKey) {
             const cached = sessionIndexCache.get(sessionId);
             const clientMeta: ClientMetadata = {
@@ -2644,6 +2828,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               tags: 'tags' in change.metadata ? (change.metadata as any).tags : cached?.tags,
               draftInput: 'draftInput' in change.metadata ? (change.metadata as any).draftInput : cached?.draftInput,
               draftUpdatedAt: 'draftUpdatedAt' in change.metadata ? (change.metadata as any).draftUpdatedAt : cached?.draftUpdatedAt,
+              hasBeenNamed: 'hasBeenNamed' in change.metadata ? (change.metadata as any).hasBeenNamed : cached?.hasBeenNamed,
             };
             if (clientMeta.draftInput !== undefined) {
               // console.log('[CollabV3] Encrypting clientMeta with draftInput, sending to index');
@@ -2714,7 +2899,9 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               mode: baseEntry.mode,
               sessionType: baseEntry.sessionType,
               parentSessionId: baseEntry.parentSessionId,
+              worktreeId: baseEntry.worktreeId,
               isArchived: baseEntry.isArchived,
+              isPinned: baseEntry.isPinned,
               messageCount: baseEntry.messageCount,
               lastMessageAt: baseEntry.lastMessageAt,
               createdAt: baseEntry.createdAt,
@@ -2732,7 +2919,14 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
             }
 
             // Encrypt client metadata for wire
-            if (baseEntry.currentContext || baseEntry.hasPendingPrompt !== undefined || baseEntry.phase || baseEntry.tags || baseEntry.draftInput !== undefined) {
+            if (
+              baseEntry.currentContext ||
+              baseEntry.hasPendingPrompt !== undefined ||
+              baseEntry.phase ||
+              baseEntry.tags ||
+              baseEntry.draftInput !== undefined ||
+              baseEntry.hasBeenNamed !== undefined
+            ) {
               const clientMeta: ClientMetadata = {
                 currentContext: baseEntry.currentContext,
                 hasPendingPrompt: baseEntry.hasPendingPrompt,
@@ -2740,6 +2934,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
                 tags: baseEntry.tags,
                 draftInput: baseEntry.draftInput,
                 draftUpdatedAt: baseEntry.draftUpdatedAt,
+                hasBeenNamed: baseEntry.hasBeenNamed,
               };
               const { encryptedClientMetadata, clientMetadataIv } = await encryptClientMetadata(clientMeta, config.encryptionKey);
               indexEntry.encryptedClientMetadata = encryptedClientMetadata;
@@ -2758,7 +2953,10 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
           // This allows partial updates (e.g., just title) to work
           // console.log('[CollabV3] metadata_updated index path: sessionId:', sessionId, 'hasCached:', !!cached, 'indexConnected:', indexConnected);
           if (cached) {
-            // Merge partial update with cached entry (cache stores decrypted values)
+            // Merge partial update with cached entry (cache stores decrypted values).
+            // Every column / metadata key in SYNC_RELEVANT_FIELDS must be merged here
+            // or partial updates from SyncedSessionStore.updateMetadata silently drop
+            // on the floor before reaching iOS.
             const updatedCache: CachedSessionIndex = {
               ...cached,
               projectId: meta.workspaceId ?? cached.projectId,
@@ -2766,8 +2964,11 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               provider: meta.provider ?? cached.provider,
               model: meta.model ?? cached.model,
               mode: (meta.mode ?? cached.mode) as CachedSessionIndex['mode'],
+              sessionType: 'sessionType' in meta ? (meta as any).sessionType : cached.sessionType,
               parentSessionId: 'parentSessionId' in meta ? meta.parentSessionId : cached.parentSessionId,
+              worktreeId: 'worktreeId' in meta ? (meta as any).worktreeId : cached.worktreeId,
               isArchived: 'isArchived' in meta ? meta.isArchived : cached.isArchived,
+              isPinned: 'isPinned' in meta ? (meta as any).isPinned : cached.isPinned,
               lastMessageAt: updatedAt ?? cached.lastMessageAt,
               updatedAt: updatedAt ?? cached.updatedAt,
               pendingExecution: 'pendingExecution' in meta ? meta.pendingExecution : cached.pendingExecution,
@@ -2779,6 +2980,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               lastReadAt: 'lastReadAt' in meta ? (meta as any).lastReadAt : cached.lastReadAt,
               draftInput: 'draftInput' in meta ? (meta as any).draftInput : cached.draftInput,
               draftUpdatedAt: 'draftUpdatedAt' in meta ? (meta as any).draftUpdatedAt : cached.draftUpdatedAt,
+              hasBeenNamed: 'hasBeenNamed' in meta ? (meta as any).hasBeenNamed : cached.hasBeenNamed,
             };
             await sendIndexUpdate(updatedCache);
           } else if (meta.title && meta.provider) {
@@ -2793,7 +2995,9 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               mode: meta.mode as CachedSessionIndex['mode'],
               sessionType: meta.sessionType,
               parentSessionId: meta.parentSessionId,
+              worktreeId: (meta as any).worktreeId,
               isArchived: meta.isArchived,
+              isPinned: (meta as any).isPinned,
               messageCount: 0,
               lastMessageAt: now,
               createdAt: now,
@@ -2807,6 +3011,7 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
               lastReadAt: (meta as any).lastReadAt,
               draftInput: (meta as any).draftInput,
               draftUpdatedAt: (meta as any).draftUpdatedAt,
+              hasBeenNamed: (meta as any).hasBeenNamed,
             };
             await sendIndexUpdate(newEntry);
           } else {
@@ -2814,16 +3019,38 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
             // Queue the partial update to be applied when the session is cached.
             // This handles cases like isExecuting being set before syncSessionsToIndex runs,
             // or title updates from session naming that arrive before the session is indexed.
-            const hasPartialUpdate = 'isExecuting' in meta || 'pendingExecution' in meta || meta.title !== undefined || 'draftInput' in meta || 'isArchived' in meta;
+            const hasPartialUpdate =
+              'isExecuting' in meta ||
+              'pendingExecution' in meta ||
+              meta.title !== undefined ||
+              'sessionType' in meta ||
+              'parentSessionId' in meta ||
+              'worktreeId' in meta ||
+              'isArchived' in meta ||
+              'isPinned' in meta ||
+              'phase' in meta ||
+              'tags' in meta ||
+              'draftInput' in meta ||
+              'draftUpdatedAt' in meta ||
+              'hasBeenNamed' in meta ||
+              'updatedAt' in meta;
             if (hasPartialUpdate) {
               // console.log('[CollabV3] Queueing partial metadata update for session:', sessionId, { isExecuting: meta.isExecuting, pendingExecution: meta.pendingExecution, title: meta.title });
               const existing = pendingMetadataUpdates.get(sessionId) || {};
               if ('isExecuting' in meta) existing.isExecuting = meta.isExecuting;
               if ('pendingExecution' in meta) existing.pendingExecution = meta.pendingExecution;
               if (meta.title !== undefined) existing.title = meta.title;
+              if ('sessionType' in meta) existing.sessionType = meta.sessionType;
+              if ('parentSessionId' in meta) existing.parentSessionId = meta.parentSessionId;
+              if ('worktreeId' in meta) existing.worktreeId = (meta as any).worktreeId;
               if ('isArchived' in meta) existing.isArchived = meta.isArchived;
+              if ('isPinned' in meta) existing.isPinned = (meta as any).isPinned;
+              if ('phase' in meta) (existing as any).phase = (meta as any).phase;
+              if ('tags' in meta) (existing as any).tags = (meta as any).tags;
               if ('draftInput' in meta) (existing as any).draftInput = (meta as any).draftInput;
               if ('draftUpdatedAt' in meta) (existing as any).draftUpdatedAt = (meta as any).draftUpdatedAt;
+              if ('hasBeenNamed' in meta) (existing as any).hasBeenNamed = (meta as any).hasBeenNamed;
+              if ('updatedAt' in meta) existing.updatedAt = meta.updatedAt;
               pendingMetadataUpdates.set(sessionId, existing);
             } else {
               // console.log('[CollabV3] Skipping index update - no cached data and missing required fields for session:', sessionId);
@@ -3326,6 +3553,12 @@ export function createCollabV3Sync(config: SyncConfig): SyncProvider {
         indexReconnectTimer = null;
       }
       indexReconnectAttempts = 0;
+      indexPreOpenFailures = 0;
+      // Explicit reconnect = user/system signal that something changed (network,
+      // settings, auth refresh). Clear the auth-blocked latch and give the JWT
+      // another shot. If it still mismatches, ensureFreshJwt will set the flag
+      // again immediately and we won't enter another tight loop.
+      indexAuthBlocked = false;
 
       // Force-close the current socket, even if it still reports OPEN.
       // After laptop sleep the WebSocket layer can stay "connected" while the

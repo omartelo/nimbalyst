@@ -18,6 +18,7 @@
 const { parentPort, workerData } = require('worker_threads');
 const { PGlite } = require('@electric-sql/pglite');
 const path = require('path');
+const { serializeWorkerError } = require('./workerErrorSerialization');
 
 // WAL maintenance: total bytes across pg_wal/ that triggers an idle CHECKPOINT.
 // Why this number: PGLite's runtime settings are min_wal_size=80MB, max_wal_size=1GB
@@ -131,21 +132,28 @@ class PGLiteWorker {
           // extracted to ./lockStaleness.js so it can be unit-tested
           // without spawning a real worker thread. See nimbalyst#272 for
           // the Windows-pid-reuse hazard the timestamp gate guards
-          // against.
+          // against, and the closed PR #316 review thread for the
+          // 'ambiguous' branch that asks the user instead of guessing.
           const { decideLockIsRunning } = require('./lockStaleness');
-          let isRunning = false;
-          if (!isStaleFromReboot) {
-            const decision = decideLockIsRunning({
+          let livenessDecision = 'stale';
+          let livenessReason = '';
+          if (isStaleFromReboot) {
+            livenessDecision = 'stale';
+            livenessReason = 'lock predates last reboot';
+          } else {
+            const result = decideLockIsRunning({
               lockPid,
               lockTimestamp,
               killFn: process.kill.bind(process),
             });
-            isRunning = decision.isRunning;
-            console.log(`[PGLite Worker] Lock liveness check: ${decision.reason}`);
+            livenessDecision = result.decision;
+            livenessReason = result.reason;
+            console.log(`[PGLite Worker] Lock liveness check: ${result.reason}`);
           }
 
-          if (isRunning) {
-            // Another instance is actually running - block!
+          if (livenessDecision === 'running') {
+            // Another instance is confirmed alive (kill(0) succeeded, OR
+            // unrecognised errno). Refuse the launch unconditionally.
             const error = new Error(
               `Database is locked by another Nimbalyst process.\n\n` +
               `Lock holder PID: ${lockPid}\n` +
@@ -157,12 +165,35 @@ class PGLiteWorker {
             error.code = 'DATABASE_LOCKED';
             error.lockPid = lockPid;
             return { acquired: false, error };
-          } else {
-            // Process is dead - stale lock from a crash
-            console.log(`[PGLite Worker] Removing stale lock file from crashed process (PID ${lockPid} no longer running)`);
-            console.log(`[PGLite Worker] Previous lock was acquired at: ${lockTimestamp}`);
-            fs.unlinkSync(this.lockFilePath);
           }
+          if (livenessDecision === 'ambiguous') {
+            // EPERM with a fresh timestamp (<60s old). Either a live
+            // sibling we cannot signal (different user / privilege level)
+            // OR a fast PID reuse on a slow-disk machine where the
+            // original lock was written less than 60s before crash.
+            // Surface a distinct error code so the main process can show
+            // a dialog letting the user choose between "Open Anyway"
+            // (force-unlock) and "Cancel". Per @ghinkle's review on the
+            // closed PR #316.
+            const error = new Error(
+              `Cannot tell whether another Nimbalyst is running.\n\n` +
+              `Lock holder PID: ${lockPid}\n` +
+              `Lock acquired: ${lockTimestamp}\n` +
+              `Lock host: ${lockHostname}\n\n` +
+              `Reason: ${livenessReason}`
+            );
+            error.code = 'DATABASE_LOCKED_AMBIGUOUS';
+            error.lockPid = lockPid;
+            error.lockFilePath = this.lockFilePath;
+            error.lockTimestamp = lockTimestamp;
+            error.lockHostname = lockHostname;
+            return { acquired: false, error };
+          }
+          // livenessDecision === 'stale'. Process is dead, or lock
+          // predates the last reboot, or EPERM with a stale timestamp.
+          console.log(`[PGLite Worker] Removing stale lock file from crashed process (PID ${lockPid} no longer running)`);
+          console.log(`[PGLite Worker] Previous lock was acquired at: ${lockTimestamp}`);
+          fs.unlinkSync(this.lockFilePath);
         }
       }
 
@@ -246,7 +277,8 @@ class PGLiteWorker {
         parentPort.postMessage({
           id: message.id,
           success: false,
-          error: error.message || String(error)
+          error: error.message || String(error),
+          errorData: serializeWorkerError(error)
         });
       }
     });
@@ -2120,6 +2152,44 @@ class PGLiteWorker {
     } catch (error) {
       console.error('[PGLite Worker] Failed to add canonical transform columns:', error);
       // Non-fatal - lazy transformation will be unavailable but app continues
+    }
+
+    // Migration: local-only shared-document origin bindings for re-upload.
+    try {
+      await this.db.exec(`
+        CREATE TABLE IF NOT EXISTS collab_local_origins (
+          org_id TEXT NOT NULL,
+          document_id TEXT NOT NULL,
+          git_remote_hash TEXT,
+          workspace_path_hash TEXT,
+          relative_path TEXT NOT NULL,
+          document_type TEXT NOT NULL,
+          source_basename TEXT NOT NULL,
+          last_local_content_hash TEXT,
+          last_collab_content_hash TEXT,
+          last_synced_at TIMESTAMPTZ,
+          last_seen_mtime_ms BIGINT,
+          last_seen_size_bytes BIGINT,
+          resolution_status TEXT NOT NULL DEFAULT 'resolved'
+            CHECK (resolution_status IN ('resolved', 'missing', 'relinked', 'conflict')),
+          resolution_error TEXT,
+          created_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL,
+          PRIMARY KEY (org_id, document_id)
+        );
+      `);
+      await this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_collab_local_origins_git_remote_hash
+          ON collab_local_origins (git_remote_hash);
+      `);
+      await this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_collab_local_origins_relative_path
+          ON collab_local_origins (org_id, relative_path);
+      `);
+      console.log('[PGLite Worker] collab_local_origins table created successfully');
+    } catch (error) {
+      console.error('[PGLite Worker] Failed to create collab_local_origins table:', error);
+      throw error;
     }
 
     // Migration: Ensure ai_tool_call_file_edits FK points to ai_agent_messages (not ai_transcript_events).

@@ -15,6 +15,7 @@ import { PendingVoiceCommand } from './PendingVoiceCommand';
 import { pendingVoiceCommandAtom, voiceActiveSessionIdAtom, type PendingVoiceCommand as PendingVoiceCommandType } from '../../store/atoms/voiceModeState';
 import { ContextUsageDisplay } from './ContextUsageDisplay';
 import { ActionPromptsDropdown } from './ActionPromptsDropdown';
+import type { ActionPrompt } from '../../store/atoms/actionPrompts';
 import { MockupAnnotationIndicator } from './MockupAnnotationIndicator';
 import { TextSelectionIndicator } from './TextSelectionIndicator';
 import { EditorContextIndicator } from './EditorContextIndicator';
@@ -103,6 +104,15 @@ interface AIInputProps {
 
   // Test ID for E2E testing
   testId?: string;
+
+  /**
+   * Called when the user picks an action prompt whose config is
+   * `launch: new-session`. The handler is expected to spawn a sibling
+   * session, prefix the body with an originating-session mention, and
+   * submit-or-prefill per the action's config. If omitted, launcher actions
+   * fall back to inserting into the current draft.
+   */
+  onLaunchActionInNewSession?: (action: ActionPrompt) => void | Promise<void>;
 }
 
 /**
@@ -152,6 +162,7 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
     currentFilePath,
     lastUserMessageTimestamp,
     testId,
+    onLaunchActionInNewSession,
   }, ref) => {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [typeaheadMatch, setTypeaheadMatch] = useState<TriggerMatch | null>(null);
@@ -1004,13 +1015,21 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
       // Handle file mention drops from file tree or files-edited sidebar
       const fileMentionPath = e.dataTransfer.getData('application/x-nimbalyst-file-mention');
       if (fileMentionPath) {
-        // Convert absolute paths to relative (file tree uses absolute, files-edited uses relative)
-        let relativePath = fileMentionPath;
-        if (workspacePath && fileMentionPath.startsWith(workspacePath)) {
-          relativePath = fileMentionPath.slice(workspacePath.length);
-          if (relativePath.startsWith('/')) relativePath = relativePath.slice(1);
-        }
-        const mention = `@${relativePath}`;
+        // The drag source may give either an absolute path (file tree) or a
+        // workspace-relative path (files-edited sidebar). Derive both so we can
+        // build a markdown link that includes the absolute target.
+        const isAbsolute = fileMentionPath.startsWith('/');
+        const absolutePath = isAbsolute
+          ? fileMentionPath
+          : workspacePath
+            ? `${workspacePath.replace(/\/$/, '')}/${fileMentionPath.replace(/^\//, '')}`
+            : fileMentionPath;
+        const displayName = absolutePath.split('/').pop() || absolutePath;
+        // Use a markdown link with the absolute path so any agent (Codex,
+        // Claude Code, etc.) can resolve it unambiguously on the first try.
+        // Bare `@workspace-relative` paths caused Codex to guess sibling
+        // directories before finding cwd-relative files.
+        const mention = `[${displayName}](${absolutePath})`;
         // Insert at cursor position, or append with space separator
         const textarea = textareaRef.current;
         const cursorPos = textarea?.selectionStart ?? value.length;
@@ -1275,6 +1294,7 @@ export const AIInput = forwardRef<AIInputRef, AIInputProps>(
                   <ActionPromptsDropdown
                     workspacePath={workspacePath}
                     onInsert={handleActionPromptInsert}
+                    onLaunchNewSession={onLaunchActionInNewSession}
                   />
                 </span>
               </HelpTooltip>

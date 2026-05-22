@@ -8,7 +8,7 @@
  * EditorMode, AgentMode, and TrackerMode.
  */
 
-import React, { useCallback, useState, useEffect, useRef, useMemo } from 'react';
+import React, { useCallback, useState, useEffect, useRef, useMemo, forwardRef, useImperativeHandle } from 'react';
 import { useAtomValue } from 'jotai';
 import { store } from '@nimbalyst/runtime/store';
 import { CollabSidebar } from './CollabSidebar';
@@ -30,11 +30,17 @@ interface CollabModeProps {
   onFileOpen: (path: string) => void;
 }
 
-export const CollabMode: React.FC<CollabModeProps> = ({
+export interface CollabModeRef {
+  closeActiveTab: () => void;
+  reopenLastClosedTab: () => Promise<void>;
+  getActiveDocumentPath: () => string | null;
+}
+
+export const CollabMode = forwardRef<CollabModeRef, CollabModeProps>(function CollabMode({
   workspacePath,
   isActive,
   onFileOpen,
-}) => {
+}, ref) {
   // Initialize shared documents sync from TeamRoom.
   // Retry when user activates collab mode, in case the initial attempt
   // failed (e.g., encryption key not yet available, admin hadn't shared keys).
@@ -59,13 +65,14 @@ export const CollabMode: React.FC<CollabModeProps> = ({
   return (
     <TabsProvider workspacePath={workspacePath} disablePersistence>
       <CollabModeInner
+        ref={ref}
         workspacePath={workspacePath}
         isActive={isActive}
         onFileOpen={onFileOpen}
       />
     </TabsProvider>
   );
-};
+});
 
 // ---------------------------------------------------------------------------
 // Persist open collab document IDs and layout in workspace state.
@@ -134,11 +141,11 @@ async function loadCollabLayout(workspacePath: string): Promise<CollabLayout> {
 /**
  * Inner component that has access to TabsProvider context.
  */
-const CollabModeInner: React.FC<CollabModeProps> = ({
+const CollabModeInner = forwardRef<CollabModeRef, CollabModeProps>(function CollabModeInner({
   workspacePath,
   isActive,
   onFileOpen,
-}) => {
+}, ref) {
   const tabsActions = useTabsActions();
   const { tabs, activeTabId } = useTabs();
   const pendingDoc = useAtomValue(pendingCollabDocumentAtom);
@@ -397,29 +404,52 @@ const CollabModeInner: React.FC<CollabModeProps> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspacePath]); // Only run on mount (tabsActions is stable ref-based)
 
-  // Auto-open a pending document (set by "Share to Team" action)
+  // Auto-open a pending document. Set by "Share to Team" (carries title +
+  // initialContent for first-share seeding) and by deep links (documentId
+  // only -- title arrives later via the shared-docs sync, which the
+  // sharedDocuments rename effect picks up).
   useEffect(() => {
     if (!pendingDoc || !isActive) return;
 
-    // Find the document in the shared documents atom
     const docs = store.get(sharedDocumentsAtom);
     const found = docs.find(d => d.documentId === pendingDoc.documentId);
-    if (found) {
-      // Clear the pending flag before opening to avoid re-triggering.
-      // The pending payload carries the authoritative documentType the
-      // sharer just chose (the shared docs atom may still be syncing the
-      // newly registered entry from the server), so prefer it.
-      const doc: SharedDocument = pendingDoc.documentType
-        ? { ...found, documentType: pendingDoc.documentType }
-        : found;
-      store.set(pendingCollabDocumentAtom, null);
-      handleDocumentSelect(doc, pendingDoc.initialContent);
-    }
+
+    // Prefer the synced doc (it has the canonical title), but fall back to
+    // a synthetic doc so cold-start deep links still open immediately.
+    const docToOpen: SharedDocument = found
+      ? (pendingDoc.documentType ? { ...found, documentType: pendingDoc.documentType } : found)
+      : {
+          documentId: pendingDoc.documentId,
+          title: pendingDoc.documentId,
+          documentType: pendingDoc.documentType ?? 'markdown',
+          createdBy: '',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+
+    store.set(pendingCollabDocumentAtom, null);
+    handleDocumentSelect(docToOpen, pendingDoc.initialContent);
   }, [pendingDoc, isActive, handleDocumentSelect]);
 
   const handleTabClose = useCallback((tabId: string) => {
     tabsActions.removeTab(tabId);
   }, [tabsActions]);
+
+  useImperativeHandle(ref, () => ({
+    closeActiveTab: () => {
+      if (activeTabId) {
+        tabsActions.removeTab(activeTabId);
+      }
+    },
+    reopenLastClosedTab: async () => {
+      await tabsActions.reopenLastClosedTab(async () => {});
+    },
+    getActiveDocumentPath: () => {
+      if (!activeTabId) return null;
+      const activeTab = tabs.find((tab) => tab.id === activeTabId);
+      return activeTab?.filePath ?? null;
+    },
+  }), [activeTabId, tabs, tabsActions]);
 
   const hasTabs = tabs.length > 0;
 
@@ -473,6 +503,7 @@ const CollabModeInner: React.FC<CollabModeProps> = ({
       {hasTabs && (
         <ChatSidebar
           workspacePath={workspacePath}
+          isActive={isActive}
           getDocumentContext={getDocumentContext}
           onFileOpen={async (filePath) => onFileOpen(filePath)}
           width={chatWidth}
@@ -481,4 +512,4 @@ const CollabModeInner: React.FC<CollabModeProps> = ({
       )}
     </div>
   );
-};
+});

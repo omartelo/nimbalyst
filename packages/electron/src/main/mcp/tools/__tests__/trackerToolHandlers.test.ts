@@ -1,6 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockQuery, mockUpsertWorkspaceTrackerSchema, mockDeleteWorkspaceTrackerSchema, mockGetAllTrackerSchemas, mockIsBuiltinTrackerSchema, mockGlobalRegistry } = vi.hoisted(() => ({
+const {
+  mockQuery,
+  mockUpsertWorkspaceTrackerSchema,
+  mockDeleteWorkspaceTrackerSchema,
+  mockGetAllTrackerSchemas,
+  mockIsBuiltinTrackerSchema,
+  mockGlobalRegistry,
+  mockApplyHeadlessBodyMarkdown,
+  mockDocumentServices,
+  mockDocService,
+} = vi.hoisted(() => ({
   mockQuery: vi.fn(),
   mockUpsertWorkspaceTrackerSchema: vi.fn(),
   mockDeleteWorkspaceTrackerSchema: vi.fn(),
@@ -9,6 +19,16 @@ const { mockQuery, mockUpsertWorkspaceTrackerSchema, mockDeleteWorkspaceTrackerS
   mockGlobalRegistry: {
     get: vi.fn(() => undefined),
     validate: vi.fn(() => ({ valid: true, errors: [] as Array<{ field: string; message: string }> })),
+  },
+  mockApplyHeadlessBodyMarkdown: vi.fn(async () => undefined),
+  mockDocumentServices: new Map<string, any>(),
+  mockDocService: {
+    getTrackerItemById: vi.fn<(...args: any[]) => Promise<any>>(async () => null),
+    listTrackerItems: vi.fn<(...args: any[]) => Promise<any[]>>(async () => []),
+    ensureTrackerProjection: vi.fn<(...args: any[]) => Promise<any>>(async () => null),
+    updateTrackerItemInFile: vi.fn<(...args: any[]) => Promise<any>>(async () => null),
+    archiveTrackerItem: vi.fn<(...args: any[]) => Promise<any>>(async () => null),
+    destroy: vi.fn(),
   },
 }));
 
@@ -43,11 +63,12 @@ vi.mock('../../../services/TrackerSchemaService', () => ({
 
 vi.mock('../../../utils/store', () => ({
   getWorkspaceState: vi.fn(() => ({ issueKeyPrefix: 'NIM' })),
+  isAnalyticsEnabled: vi.fn(() => true),
 }));
 
 vi.mock('../../../window/WindowManager', () => ({
   findWindowByWorkspace: vi.fn(() => null),
-  documentServices: new Map(),
+  documentServices: mockDocumentServices,
 }));
 
 vi.mock('@nimbalyst/runtime/plugins/TrackerPlugin/models/TrackerDataModel', () => ({
@@ -55,7 +76,20 @@ vi.mock('@nimbalyst/runtime/plugins/TrackerPlugin/models/TrackerDataModel', () =
 }));
 
 vi.mock('electron', () => ({
+  app: {
+    getPath: vi.fn(() => '/tmp'),
+    isPackaged: false,
+    getName: vi.fn(() => 'Nimbalyst'),
+  },
   BrowserWindow: { getAllWindows: () => [] },
+}));
+
+// NIM-640 regression guard: `handleTrackerUpdate` must seed the live
+// DocumentRoom Y.Doc when description changes, otherwise the body lands
+// only in PGLite + cache and shared `fullDocument` trackers (incident,
+// plan, decision) render blank for every peer.
+vi.mock('../../../services/MainBodyDocService', () => ({
+  applyHeadlessBodyMarkdown: mockApplyHeadlessBodyMarkdown,
 }));
 
 import {
@@ -88,29 +122,57 @@ function makeRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function makeItem(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'bug_target',
+    issueNumber: 1,
+    issueKey: 'NIM-1',
+    type: 'bug',
+    typeTags: ['bug'],
+    title: 'Scoped bug',
+    status: 'to-do',
+    priority: 'high',
+    workspace: '/tmp/ws',
+    source: 'native',
+    ...overrides,
+  };
+}
+
 describe('handleTrackerGet', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDocumentServices.clear();
   });
 
-  it('scopes issue key lookups to the active workspace', async () => {
-    mockQuery.mockResolvedValue({
-      rows: [makeRow({ workspace: '/tmp/workspace-a' })],
-    });
+  it('reads items through the workspace document service', async () => {
+    mockDocumentServices.set('/tmp/workspace-a', mockDocService);
+    mockDocService.getTrackerItemById.mockResolvedValueOnce(
+      makeItem({
+        id: 'fm:plan:plans/example.md',
+        issueKey: undefined,
+        issueNumber: undefined,
+        type: 'plan',
+        typeTags: ['plan'],
+        title: 'Example plan',
+        workspace: '/tmp/workspace-a',
+        source: 'frontmatter',
+        sourceRef: 'plans/example.md',
+        content: '# Body',
+      }),
+    );
 
-    const result = await handleTrackerGet({ id: 'NIM-1' }, '/tmp/workspace-a');
+    const result = await handleTrackerGet({ id: 'fm:plan:plans/example.md' }, '/tmp/workspace-a');
 
     expect(result.isError).toBe(false);
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.stringContaining('WHERE (id = $1 OR issue_key = $1) AND workspace = $2'),
-      ['NIM-1', '/tmp/workspace-a'],
-    );
+    expect(mockDocService.getTrackerItemById).toHaveBeenCalledWith('fm:plan:plans/example.md');
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 });
 
 describe('tracker schema tools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDocumentServices.clear();
     mockGetAllTrackerSchemas.mockReturnValue([]);
     mockIsBuiltinTrackerSchema.mockReturnValue(false);
   });
@@ -193,6 +255,7 @@ describe('tracker schema tools', () => {
 describe('handleTrackerCreate session linking', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDocumentServices.clear();
     mockGlobalRegistry.validate.mockReturnValue({ valid: true, errors: [] });
   });
 
@@ -301,6 +364,7 @@ describe('handleTrackerCreate session linking', () => {
 describe('handleTrackerLinkSession', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDocumentServices.clear();
   });
 
   it('links the explicit target sessionId, not the ambient session', async () => {
@@ -391,11 +455,77 @@ describe('handleTrackerLinkSession', () => {
     expect(sqls.some((s) => s.includes('UPDATE ai_sessions'))).toBe(false);
     expect(sqls.some((s) => s.includes('UPDATE tracker_items'))).toBe(false);
   });
+
+  it('links a frontmatter-backed plan using its canonical public id', async () => {
+    const publicId = 'fm:plan:plans/example.md';
+    const trackerRow = makeRow({
+      id: 'plan_projection',
+      issue_key: null,
+      issue_number: null,
+      type: 'plan',
+      source: 'frontmatter',
+      source_ref: 'plans/example.md',
+      document_path: 'plans/example.md',
+      workspace: '/tmp/ws',
+      data: JSON.stringify({ title: 'Example plan', status: 'to-do', priority: 'high' }),
+    });
+    mockDocumentServices.set('/tmp/ws', mockDocService);
+    mockDocService.getTrackerItemById.mockResolvedValueOnce(
+      makeItem({
+        id: publicId,
+        issueKey: undefined,
+        issueNumber: undefined,
+        type: 'plan',
+        typeTags: ['plan'],
+        title: 'Example plan',
+        source: 'frontmatter',
+        sourceRef: 'plans/example.md',
+      }),
+    );
+    mockDocService.ensureTrackerProjection.mockResolvedValueOnce(
+      makeItem({
+        id: publicId,
+        issueKey: undefined,
+        issueNumber: undefined,
+        type: 'plan',
+        typeTags: ['plan'],
+        title: 'Example plan',
+        source: 'frontmatter',
+        sourceRef: 'plans/example.md',
+      }),
+    );
+    mockQuery
+      .mockResolvedValueOnce({ rows: [trackerRow] }) // resolveTrackerRowByReference
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }) // explicit-session existence
+      .mockResolvedValueOnce({ rows: [{ data: {} }] }) // createBidirectionalLink: SELECT tracker
+      .mockResolvedValueOnce({ rows: [] }) // createBidirectionalLink: UPDATE tracker
+      .mockResolvedValueOnce({ rows: [{ metadata: {} }] }) // createBidirectionalLink: SELECT session
+      .mockResolvedValueOnce({ rows: [] }) // createBidirectionalLink: UPDATE session
+      .mockResolvedValueOnce({ rows: [{ data: { linkedSessions: ['session_explicit'] } }] }) // linked count
+      .mockResolvedValueOnce({ rows: [trackerRow] }) // notifyTrackerItemUpdated
+      .mockResolvedValueOnce({ rows: [{ metadata: { linkedTrackerItemIds: [publicId] } }] }); // notifySessionLinkedTrackerChanged
+
+    const result = await handleTrackerLinkSession(
+      { trackerId: publicId, sessionId: 'session_explicit' },
+      'session_ambient',
+      '/tmp/ws',
+    );
+
+    expect(result.isError).toBe(false);
+    expect(mockDocService.ensureTrackerProjection).toHaveBeenCalledWith(publicId);
+    const updateSessionCall = mockQuery.mock.calls.find((call) =>
+      String(call[0]).includes('UPDATE ai_sessions'),
+    );
+    expect(updateSessionCall?.[1]?.[0]).toContain(publicId);
+    const payload = JSON.parse(result.content[0].text!);
+    expect(payload.structured.trackerId).toBe(publicId);
+  });
 });
 
 describe('handleTrackerUnlinkSession', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDocumentServices.clear();
   });
 
   it('unlinks the explicit target sessionId, not the ambient session', async () => {
@@ -492,6 +622,7 @@ describe('handleTrackerUnlinkSession', () => {
 describe('handleTrackerUpdate description / collab body', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDocumentServices.clear();
     mockGlobalRegistry.validate.mockReturnValue({ valid: true, errors: [] });
     // Default: non-collab (local) workspace -- description writes proceed.
     vi.mocked(getEffectiveTrackerSyncPolicy).mockReturnValue({ mode: 'local', scope: 'project' });
@@ -592,4 +723,81 @@ describe('handleTrackerUpdate description / collab body', () => {
   // path bumps body_version + writes tracker_body_cache so cold peers learn
   // the body changed via the metadata layer; the live body Y.Doc in
   // DocumentRoom is still the source of truth for warm readers.
+
+  // NIM-640: `tracker_update` was forgetting to seed the live DocumentRoom
+  // Y.Doc the way `tracker_create` does, so shared `fullDocument` trackers
+  // (incident, plan, decision) had their body land only in PGLite + cache.
+  // Peers (including the editor panel) rendered blank until somebody opened
+  // the editor and the renderer bootstrap pushed the local seed up. This
+  // test pins the contract: when description is updated and a workspace is
+  // attached, applyHeadlessBodyMarkdown is called with the matching
+  // arguments.
+  it('seeds the live Y.Doc via applyHeadlessBodyMarkdown when description changes (NIM-640)', async () => {
+    setupUpdateQueueWithDescription();
+
+    await handleTrackerUpdate(
+      { id: 'NIM-1', description: 'NIM-640 description content' },
+      '/tmp/ws',
+    );
+
+    expect(mockApplyHeadlessBodyMarkdown).toHaveBeenCalledTimes(1);
+    expect(mockApplyHeadlessBodyMarkdown).toHaveBeenCalledWith(
+      '/tmp/ws',
+      'bug_target',
+      'NIM-640 description content',
+    );
+  });
+
+  it('routes frontmatter-backed plan status updates through updateTrackerItemInFile', async () => {
+    const publicId = 'fm:plan:plans/example.md';
+    const trackerRow = makeRow({
+      id: 'plan_projection',
+      issue_key: null,
+      issue_number: null,
+      type: 'plan',
+      source: 'frontmatter',
+      source_ref: 'plans/example.md',
+      document_path: 'plans/example.md',
+      workspace: '/tmp/ws',
+      data: JSON.stringify({ title: 'Example plan', status: 'to-do', priority: 'high' }),
+    });
+    const planItem = makeItem({
+      id: publicId,
+      issueKey: undefined,
+      issueNumber: undefined,
+      type: 'plan',
+      typeTags: ['plan'],
+      title: 'Example plan',
+      status: 'to-do',
+      priority: 'high',
+      source: 'frontmatter',
+      sourceRef: 'plans/example.md',
+      workspace: '/tmp/ws',
+    });
+    mockDocumentServices.set('/tmp/ws', mockDocService);
+    mockDocService.getTrackerItemById
+      .mockResolvedValueOnce(planItem)
+      .mockResolvedValueOnce({ ...planItem, status: 'in-progress' });
+    mockDocService.ensureTrackerProjection.mockResolvedValueOnce(planItem);
+    mockDocService.updateTrackerItemInFile.mockResolvedValueOnce({ ...planItem, status: 'in-progress' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [trackerRow] }) // resolveTrackerRowByReference after ensureProjection
+      .mockResolvedValueOnce({ rows: [trackerRow] }) // resolveTrackerRowByReference after file update
+      .mockResolvedValueOnce({ rows: [] }) // UPDATE tracker_items SET data
+      .mockResolvedValueOnce({ rows: [trackerRow] }) // notifyTrackerItemUpdated
+      .mockResolvedValue({ rows: [trackerRow] });
+
+    const result = await handleTrackerUpdate(
+      { id: publicId, status: 'in-progress' },
+      '/tmp/ws',
+    );
+
+    expect(result.isError).toBe(false);
+    expect(mockDocService.updateTrackerItemInFile).toHaveBeenCalledWith(publicId, {
+      status: 'in-progress',
+    });
+    const payload = JSON.parse(result.content[0].text!);
+    expect(payload.structured.id).toBe(publicId);
+    expect(payload.structured.type).toBe('plan');
+  });
 });

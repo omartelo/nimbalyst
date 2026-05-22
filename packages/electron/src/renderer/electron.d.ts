@@ -719,6 +719,144 @@ interface ElectronAPI {
       success: boolean;
       error?: string;
     }>;
+    getLocalOrigin: (workspacePath: string, documentId: string) => Promise<{
+      success: boolean;
+      binding?: {
+        orgId: string;
+        documentId: string;
+        gitRemoteHash: string | null;
+        workspacePathHash: string | null;
+        relativePath: string;
+        documentType: string;
+        sourceBasename: string;
+        lastLocalContentHash: string | null;
+        lastCollabContentHash: string | null;
+        lastSyncedAt: string | null;
+        lastSeenMtimeMs: number | null;
+        lastSeenSizeBytes: number | null;
+        resolutionStatus: 'resolved' | 'missing' | 'relinked' | 'conflict';
+        resolutionError: string | null;
+        createdAt: string;
+        updatedAt: string;
+        resolvedPath: string | null;
+      } | null;
+      error?: string;
+    }>;
+    saveLocalOrigin: (payload: {
+      workspacePath: string;
+      documentId: string;
+      documentType: string;
+      sourceFilePath: string;
+      lastLocalContentHash: string | null;
+      lastCollabContentHash: string | null;
+    }) => Promise<{
+      success: boolean;
+      binding?: {
+        orgId: string;
+        documentId: string;
+        gitRemoteHash: string | null;
+        workspacePathHash: string | null;
+        relativePath: string;
+        documentType: string;
+        sourceBasename: string;
+        lastLocalContentHash: string | null;
+        lastCollabContentHash: string | null;
+        lastSyncedAt: string | null;
+        lastSeenMtimeMs: number | null;
+        lastSeenSizeBytes: number | null;
+        resolutionStatus: 'resolved' | 'missing' | 'relinked' | 'conflict';
+        resolutionError: string | null;
+        createdAt: string;
+        updatedAt: string;
+        resolvedPath: string | null;
+      } | null;
+      error?: string;
+    }>;
+    relinkLocalOrigin: (payload: {
+      workspacePath: string;
+      documentId: string;
+      documentType: string;
+      sourceFilePath: string;
+    }) => Promise<{
+      success: boolean;
+      binding?: {
+        orgId: string;
+        documentId: string;
+        gitRemoteHash: string | null;
+        workspacePathHash: string | null;
+        relativePath: string;
+        documentType: string;
+        sourceBasename: string;
+        lastLocalContentHash: string | null;
+        lastCollabContentHash: string | null;
+        lastSyncedAt: string | null;
+        lastSeenMtimeMs: number | null;
+        lastSeenSizeBytes: number | null;
+        resolutionStatus: 'resolved' | 'missing' | 'relinked' | 'conflict';
+        resolutionError: string | null;
+        createdAt: string;
+        updatedAt: string;
+        resolvedPath: string | null;
+      } | null;
+      error?: string;
+    }>;
+    clearLocalOrigin: (workspacePath: string, documentId: string) => Promise<{
+      success: boolean;
+      error?: string;
+    }>;
+    reuploadLocalOrigin: (payload: {
+      workspacePath: string;
+      documentId: string;
+      forceOverwriteShared?: boolean;
+    }) => Promise<{
+      success: boolean;
+      status: 'noop' | 'uploaded' | 'conflict' | 'missing-source' | 'unsupported' | 'error';
+      conflictKind?: 'missing-baseline' | 'shared-ahead' | 'diverged';
+      message?: string;
+      binding?: {
+        orgId: string;
+        documentId: string;
+        gitRemoteHash: string | null;
+        workspacePathHash: string | null;
+        relativePath: string;
+        documentType: string;
+        sourceBasename: string;
+        lastLocalContentHash: string | null;
+        lastCollabContentHash: string | null;
+        lastSyncedAt: string | null;
+        lastSeenMtimeMs: number | null;
+        lastSeenSizeBytes: number | null;
+        resolutionStatus: 'resolved' | 'missing' | 'relinked' | 'conflict';
+        resolutionError: string | null;
+        createdAt: string;
+        updatedAt: string;
+        resolvedPath: string | null;
+      } | null;
+      migration?: { okCount: number; failedCount: number };
+    }>;
+    findLocalOriginLink: (workspacePath: string, sourceFilePath: string) => Promise<{
+      success: boolean;
+      binding?: {
+        orgId: string;
+        documentId: string;
+        gitRemoteHash: string | null;
+        workspacePathHash: string | null;
+        relativePath: string;
+        documentType: string;
+        sourceBasename: string;
+        lastLocalContentHash: string | null;
+        lastCollabContentHash: string | null;
+        lastSyncedAt: string | null;
+        lastSeenMtimeMs: number | null;
+        lastSeenSizeBytes: number | null;
+        resolutionStatus: 'resolved' | 'missing' | 'relinked' | 'conflict';
+        resolutionError: string | null;
+        createdAt: string;
+        updatedAt: string;
+        resolvedPath: string | null;
+      } | null;
+      error?: string;
+    }>;
     getJwt: (orgId: string) => Promise<{
       success: boolean;
       jwt?: string;

@@ -437,6 +437,9 @@ export interface WorkspaceState {
   collabTree?: {
     expandedFolders: string[];
     customFolders: string[];
+    // Folder path most recently used as the destination for "Share to Team".
+    // Pre-selected on next share so users don't re-pick the same folder.
+    lastSharedFolder?: string;
   };
   collabPendingUpdates?: Record<string, {
     mergedUpdateBase64: string;
