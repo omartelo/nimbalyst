@@ -68,7 +68,7 @@ import { MetaAgentMode } from '../MetaAgentMode/MetaAgentMode';
 
 export interface AgentModeRef {
   createNewSession: (initialDraft?: string) => Promise<string | undefined>;
-  createNewWorktreeSession: () => Promise<void>;
+  createNewWorktreeSession: (options?: { baseBranch?: string; name?: string }) => Promise<void>;
   openSessionInTab: (sessionId: string) => Promise<void>;
   closeActiveTab: () => void;
   reopenLastClosedSession: () => void;
@@ -363,7 +363,7 @@ export const AgentMode = forwardRef<AgentModeRef, AgentModeProps>(function Agent
   }, [trayNewSessionRequest, setTrayNewSessionRequest, createNewSession]);
 
   // Create new worktree session
-  const createNewWorktreeSession = useCallback(async () => {
+  const createNewWorktreeSession = useCallback(async (options?: { baseBranch?: string; name?: string }) => {
     if (!window.electronAPI) return;
 
     // Check if worktrees feature is available
@@ -374,7 +374,12 @@ export const AgentMode = forwardRef<AgentModeRef, AgentModeProps>(function Agent
 
     try {
       // Create the worktree
-      const worktreeResult: WorktreeCreateResult = await window.electronAPI.invoke('worktree:create', workspacePath);
+      const ipcOptions = options?.baseBranch || options?.name ? options : undefined;
+      const worktreeResult: WorktreeCreateResult = await window.electronAPI.invoke(
+        'worktree:create',
+        workspacePath,
+        ipcOptions
+      );
       if (!worktreeResult.success || !worktreeResult.worktree) {
         throw new Error(worktreeResult.error || 'Failed to create worktree');
       }

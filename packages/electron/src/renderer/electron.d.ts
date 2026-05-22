@@ -808,7 +808,7 @@ interface ElectronAPI {
   };
 
   // Worktree operations
-  worktreeCreate: (workspacePath: string, name?: string) => Promise<{
+  worktreeCreate: (workspacePath: string, options?: { name?: string; baseBranch?: string }) => Promise<{
     success: boolean;
     error?: string;
     worktree?: {
