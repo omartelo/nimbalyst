@@ -182,7 +182,7 @@ interface SessionHistoryProps {
   onSessionBranch?: (sessionId: string) => void; // Callback when user wants to branch a session
   onNewSession?: () => void;
   onNewTerminal?: () => void; // Callback for creating a new terminal session
-  onNewWorktreeSession?: (options?: { baseBranch?: string; name?: string }) => void; // Callback for creating new worktree session
+  onNewWorktreeSession?: (options?: { baseBranch?: string; name?: string }) => void | Promise<void>; // Callback for creating new worktree session
   onNewBlitz?: () => void; // Callback for creating a new blitz (multi-worktree prompt)
   isGitRepo?: boolean; // Whether the workspace is a git repository (needed for worktree feature)
   onAddSessionToWorktree?: (worktreeId: string) => void; // Callback for adding session to existing worktree
@@ -2823,9 +2823,12 @@ const SessionHistoryComponent: React.FC<SessionHistoryProps> = ({
     <WorktreeBaseBranchPicker
       isOpen={worktreeBaseBranchPickerOpen}
       workspacePath={workspacePath}
-      onCreate={({ baseBranch, name }) => {
+      onCreate={async ({ baseBranch, name }) => {
+        // Await the parent's create handler so the picker can keep its
+        // submitting state until creation actually resolves (and surface
+        // any error inline without losing the user's input).
+        await onNewWorktreeSession({ baseBranch, name });
         setWorktreeBaseBranchPickerOpen(false);
-        onNewWorktreeSession({ baseBranch, name });
       }}
       onCancel={() => setWorktreeBaseBranchPickerOpen(false)}
     />

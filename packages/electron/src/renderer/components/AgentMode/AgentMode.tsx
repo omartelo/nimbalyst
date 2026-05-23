@@ -443,6 +443,9 @@ export const AgentMode = forwardRef<AgentModeRef, AgentModeProps>(function Agent
       }
     } catch (error) {
       console.error('[AgentMode] Failed to create worktree session:', error);
+      // Re-throw so callers awaiting the promise (e.g. WorktreeBaseBranchPicker)
+      // can surface the error to the user instead of silently closing.
+      throw error;
     }
   }, [workspacePath, addSession, setSelectedWorkstream, defaultModel, isWorktreesAvailable, isGitRepo]);
 
