@@ -29,7 +29,10 @@ interface MarketplaceData {
 
 interface InstalledPlugin {
   name: string;
+  source: string;
   path: string;
+  scope: 'user' | 'project';
+  projectPath?: string;
   enabled: boolean;
 }
 
@@ -263,31 +266,111 @@ async function writeInstalledPluginsJson(data: InstalledPluginsJson): Promise<vo
 }
 
 /**
- * List installed plugins from installed_plugins.json (user scope only)
+ * Read enabledPlugins from a Claude settings.json file.
+ * Returns an empty record if the file is missing or malformed.
  */
-async function listInstalledPlugins(): Promise<InstalledPlugin[]> {
+async function readEnabledPlugins(settingsPath: string): Promise<Record<string, boolean>> {
+  try {
+    const content = await fsPromises.readFile(settingsPath, 'utf-8');
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === 'object' && parsed.enabledPlugins && typeof parsed.enabledPlugins === 'object') {
+      return parsed.enabledPlugins as Record<string, boolean>;
+    }
+  } catch {
+    // Missing file or invalid JSON — treat as no overrides.
+  }
+  return {};
+}
+
+/**
+ * Resolve the merged enabledPlugins map for a given workspace.
+ * Project-level settings override user-level ones; settings.local.json wins last.
+ */
+async function loadEnabledPlugins(workspacePath?: string): Promise<Record<string, boolean>> {
+  const userSettings = await readEnabledPlugins(path.join(os.homedir(), '.claude', 'settings.json'));
+  if (!workspacePath) {
+    return userSettings;
+  }
+  const projectSettings = await readEnabledPlugins(path.join(workspacePath, '.claude', 'settings.json'));
+  const projectLocalSettings = await readEnabledPlugins(path.join(workspacePath, '.claude', 'settings.local.json'));
+  return { ...userSettings, ...projectSettings, ...projectLocalSettings };
+}
+
+/**
+ * Parse a plugin key in the `name@source` format used by installed_plugins.json.
+ */
+function parsePluginKey(pluginKey: string): { name: string; source: string } {
+  const atIndex = pluginKey.lastIndexOf('@');
+  if (atIndex === -1) {
+    return { name: pluginKey, source: '' };
+  }
+  return {
+    name: pluginKey.slice(0, atIndex),
+    source: pluginKey.slice(atIndex + 1),
+  };
+}
+
+/**
+ * Check whether a project-scoped installation belongs to the given workspace.
+ * Accepts both exact matches and workspaces nested below the project root.
+ */
+function projectScopeMatchesWorkspace(projectPath: string | undefined, workspacePath: string | undefined): boolean {
+  if (!projectPath || !workspacePath) {
+    return false;
+  }
+  const normalizedProject = path.resolve(projectPath);
+  const normalizedWorkspace = path.resolve(workspacePath);
+  return (
+    normalizedWorkspace === normalizedProject ||
+    normalizedWorkspace.startsWith(normalizedProject + path.sep)
+  );
+}
+
+/**
+ * List installed plugins from installed_plugins.json.
+ *
+ * Includes:
+ * - All user-scoped plugins
+ * - Project-scoped plugins whose `projectPath` matches the supplied workspace
+ *
+ * The returned `enabled` flag reflects the merged enabledPlugins map across
+ * `~/.claude/settings.json`, `<workspace>/.claude/settings.json`, and
+ * `<workspace>/.claude/settings.local.json` (Claude CLI precedence).
+ */
+async function listInstalledPlugins(workspacePath?: string): Promise<InstalledPlugin[]> {
   const plugins: InstalledPlugin[] = [];
 
   try {
-    const installedJson = await readInstalledPluginsJson();
+    const [installedJson, enabledMap] = await Promise.all([
+      readInstalledPluginsJson(),
+      loadEnabledPlugins(workspacePath),
+    ]);
 
     for (const [pluginKey, installations] of Object.entries(installedJson.plugins)) {
-      // Only include user-scoped plugins
+      const { name, source } = parsePluginKey(pluginKey);
+      const enabled = enabledMap[pluginKey] === true;
+
       for (const installation of installations) {
-        if (installation.scope === 'user') {
-          // Verify the path still exists
-          try {
-            await fsPromises.access(installation.installPath);
-            // Extract plugin name from key (format: pluginName@source)
-            const pluginName = pluginKey.split('@')[0];
-            plugins.push({
-              name: pluginName,
-              path: installation.installPath,
-              enabled: true,
-            });
-          } catch {
-            logger.main.warn(`[ClaudePlugins] Plugin path not found: ${installation.installPath}`);
-          }
+        const includeInstallation =
+          installation.scope === 'user' ||
+          (installation.scope === 'project' && projectScopeMatchesWorkspace(installation.projectPath, workspacePath));
+
+        if (!includeInstallation) {
+          continue;
+        }
+
+        try {
+          await fsPromises.access(installation.installPath);
+          plugins.push({
+            name,
+            source,
+            path: installation.installPath,
+            scope: installation.scope,
+            projectPath: installation.projectPath,
+            enabled,
+          });
+        } catch {
+          logger.main.warn(`[ClaudePlugins] Plugin path not found: ${installation.installPath}`);
         }
       }
     }
@@ -625,9 +708,10 @@ export function registerClaudeCodePluginHandlers() {
   });
 
   // List installed plugins
-  safeHandle('claude-plugin:list-installed', async () => {
+  safeHandle('claude-plugin:list-installed', async (_event, payload?: { workspacePath?: string }) => {
     try {
-      const plugins = await listInstalledPlugins();
+      const workspacePath = typeof payload === 'object' && payload !== null ? payload.workspacePath : undefined;
+      const plugins = await listInstalledPlugins(workspacePath);
       return { success: true, data: plugins };
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unknown error';

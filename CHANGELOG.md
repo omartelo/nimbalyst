@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-uploading a local source into a shared markdown document now waits for the collab write to be acknowledged before tearing down the headless sync client.
 <!-- Bug fixes go here -->
 - Codex session-naming reminder no longer leaks into the chat transcript; its turn output is tagged so the transcript hides it. (#420)
+- Claude Code plugins installed at the project scope (via `<workspace>/.claude/settings.json` `enabledPlugins`) now appear in the Installed plugins list when the panel is opened from a project's settings, with badges showing the marketplace source and whether the plugin is user- or project-scoped.
+- Slash-command typeahead now lists commands and skills from Claude CLI plugins (`~/.claude/plugins/`) without requiring the experimental "Agent Workflows" toggle, matching what the Claude Agent SDK auto-loads from `enabledPlugins`.
 
 ### Removed
 <!-- Removed features go here -->
