@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extension docs now cover all four markdown/transcript contribution surfaces in both the internal architecture doc and the public SDK docs, including declarative module exports, diff handlers, transcript renderer hooks, and the current `@nimbalyst/runtime` import surface.
 
 ### Fixed
+- Files Mode editor now surfaces AI edits to blockquote lines as red/green diffs, the same as plain paragraphs. (#433)
 - Project quick open now loads recent projects from stored recents instead of crawling every workspace on open.
 - Rebuild Extensions submenu now lists buildable extensions alphabetically.
 - Tracker list, table, and kanban views now share the session-style `#tag` typeahead filter.
@@ -28,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Codex session-naming reminder no longer leaks into the chat transcript; its turn output is tagged so the transcript hides it. (#420)
 - Claude Code plugins installed at the project scope (via `<workspace>/.claude/settings.json` `enabledPlugins`) now appear in the Installed plugins list when the panel is opened from a project's settings, with badges showing the marketplace source and whether the plugin is user- or project-scoped.
 - Slash-command typeahead now lists commands and skills from Claude CLI plugins (`~/.claude/plugins/`) without requiring the experimental "Agent Workflows" toggle, matching what the Claude Agent SDK auto-loads from `enabledPlugins`.
+- Excalidraw "import mermaid" now registers the rendered diagram image, so it no longer shows as a broken thumbnail. (#428)
+- Codex sessions now append actionable guidance when `~/.codex/config.toml` has a url-based MCP server the bundled Codex rejects, instead of an opaque config-load failure. (#424)
 
 ### Removed
 <!-- Removed features go here -->
