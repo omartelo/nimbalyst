@@ -11,10 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Shared documents have revision history: Cmd/Ctrl+S saves a named version, auto snapshots run after idle, and any past revision can be restored from the History dialog.
 - Custom shared-document editors can publish history controllers so the global History dialog can route to collaborative revisions.
+- Claude Opus 4.8 is now selectable in the Claude provider (1M context, dateless ID `claude-opus-4-8`) and is the default Claude model for new installs.
+- Claude Code variants `opus-4-7` and `opus-4-7-1m` pinned to Opus 4.7 so it stays selectable after the canonical `opus` alias was bumped to 4.8.
 <!-- New features go here -->
 
 ### Changed
 <!-- Changes to existing functionality go here -->
+- Default Claude model bumped from `claude-opus-4-7` to `claude-opus-4-8`. Existing sessions keep their configured model; only new sessions and "reset to default" pick up 4.8.
 - Auto-update now downloads in the background and shows only the "Ready to install" toast; the redundant "Update Available" toast has been removed. (#327)
 - Extension docs now cover all four markdown/transcript contribution surfaces in both the internal architecture doc and the public SDK docs, including declarative module exports, diff handlers, transcript renderer hooks, and the current `@nimbalyst/runtime` import surface.
 
