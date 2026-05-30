@@ -12,15 +12,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude Opus 4.8 is now selectable in the Claude provider (1M context, dateless ID `claude-opus-4-8`) and is the default Claude model for new installs. (#473)
 - Claude Code variants `opus-4-7` and `opus-4-7-1m` pinned to Opus 4.7 so it stays selectable after the canonical `opus` alias was bumped to 4.8. (#473)
 <!-- New features go here -->
+- Alpha SQLite storage backend behind an opt-in Settings → Database migration. Dry-run reports row counts and integrity against your live PGLite without touching it; the real migration preserves PGLite at `pglite-db.migrated-<ts>/` for rollback. WriteCoordinator batches writes through a single lane and chunks slow ops on a background lane; FTS5 mirrors back agent-message and transcript-event search; Database Browser gains a Performance tab.
+- Worktree git panel now has a Manual/Smart commit toggle and "Commit with AI" button, matching the non-worktree experience.
+- Contextual tips: small bottom-left cards that suggest tracker mode, worktree sessions, the keyboard-shortcuts dialog, and theme exploration based on local feature usage.
+- Tip body now renders basic markdown (paragraphs, bullets, bold).
+- Empty AI session panels now cycle through 15 additional contextual tips: the four embedded editors (Excalidraw, MockupLM, DataModelLM, spreadsheets), shared session and document links, CLAUDE.md standing instructions, auto-commit mode, document history (Cmd+Y), quick open (Cmd+O), content search (Cmd+Shift+F), mobile pairing, scheduled wakeups, action prompts, and the lightning interrupt button.
+- Session history search supports a virtual `#worktree` tag that filters to all worktree sessions and their children.
+- Shared Documents file tree now has inline search by document name or folder path.
 
 ### Changed
 <!-- Changes to existing functionality go here -->
 - Default Claude model bumped from `claude-opus-4-7` to `claude-opus-4-8`. Existing sessions keep their configured model; only new sessions and "reset to default" pick up 4.8. (#473)
+- Bumping a tip or walkthrough version now re-shows it even if the prior version was completed or dismissed.
+- The alpha SQLite backend now migrates session, transcript, tracker, and document stores more completely, with worker-backed execution and expanded validation/adoption flows to keep large migrations and database browsing responsive.
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Mobile sync no longer wastes per-session storage on transient Codex app-server delta and diff-update events, preventing noisy sessions from tripping the 10 MB SessionRoom cap too early.
+- Codex app-server transcripts no longer duplicate commit proposal widgets or final messages when repeated item/turn notifications arrive.
+- SQLite migration now reconciles final PGLite writes before cutover, rollback works after SQLite is active, voice-mode session resume no longer depends on PG-only interval SQL, and SQLite-backed analytics no longer hit PostgreSQL-only queries.
+- Sessions resumed from queued prompts now stay marked running until the continuation actually finishes, so the session dashboard and background-task UI no longer flip to idle mid-turn.
+- Sessions no longer get stuck in the running state after the final queued-prompt continuation completes; the dispatcher now ends the session once the queue chain fully drains.
+- Embedded calc sheets and other inline custom editors no longer immediately lose focus after the second click used to enter the embedded editor.
 - Agent transcript no longer collapses `$7M ... $40M`-style currency text into LaTeX. (#462)
+- Markdown-led transcript file change cards no longer append sibling embedded editor previews like Excalidraw beneath the markdown diff.
+- Tracker table view now gives the Type column enough width to show its header and icon instead of collapsing to a clipped sliver.
+- Smart commit in worktree sessions now resolves session-edited files against the worktree path, so the cross-reference with git status correctly matches.
 - Blitz no longer silently dismisses the dialog when run against a workspace whose git repo has no commits. (#455)
+- Share to Team now seeds new shared extension documents into the collab room before publishing the link, so teammates no longer open blank MockupLM docs when they join immediately.
+- Re-uploading a shared MockupLM document now resolves the correct collab content adapter for `.mockup.html` and `.mockupproject` files.
+- Shared-document history now records bootstrap and manual revisions reliably; Cmd/Ctrl+S inside a collab editor creates a manual revision, and Restore waits for pending writes to settle before bailing on transient sync status.
+- Session history no longer pegs the renderer at 100% CPU during AI streaming.
+- Slow `getPendingFilesForSession` query that compounded the streaming slowdown now uses a partial expression index and a short-lived cache.
 
 ### Removed
 <!-- Removed features go here -->

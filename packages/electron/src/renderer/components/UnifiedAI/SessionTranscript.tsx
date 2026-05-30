@@ -35,6 +35,8 @@ import { WakeupBanner } from '../AIChat/WakeupBanner';
 import type { AIMode } from './ModeTag';
 // Note: ExitPlanMode, AskUserQuestion, and ToolPermission use inline widgets via InteractiveWidgetHost (in runtime package)
 import { SlashCommandSuggestions } from './SlashCommandSuggestions';
+import { InlineTipDisplay } from '../../tips/InlineTipDisplay';
+import { activeTipIdAtom } from '../../tips/atoms';
 import { supportsWorkspaceSlashCommands } from '../Typeahead/slashCommandAutocomplete';
 import type { TextSelection } from './TextSelectionIndicator';
 import { type SerializableDocumentContext } from '../../hooks/useDocumentContext';
@@ -94,6 +96,35 @@ import { autoCommitEnabledAtom, setAutoCommitEnabledAtom } from '../../store/ato
 import { diffPeekSizeAtom, setDiffPeekSizeAtom } from '../../store/atoms/diffPeekSizeAtoms';
 import { registerSessionWorkspace, loadInitialSessionFileState } from '../../store/listeners/fileStateListeners';
 import { SESSION_PHASE_COLUMNS, setSessionPhaseAtom, type SessionPhase } from '../../store/atoms/sessionKanban';
+
+/**
+ * Detect a metadata value that's the artifact of `{...stringValue, ...}` -
+ * the spread treats each character of the string as a numeric-keyed
+ * property, producing objects with millions of `"0"`, `"1"`, ... entries.
+ * Spreading such an object via `...metadata` later in the render path
+ * throws V8's "RangeError: Too many properties to enumerate" and crashes
+ * the session view. Two known sessions in production hit this state via
+ * a legacy bad write upstream; the row should be cleaned DB-side, but
+ * the UI must not crash before that runs.
+ *
+ * Heuristic uses only the `in` operator (O(1) property lookups) so we
+ * never trigger the same enumeration that would re-throw the RangeError.
+ * If keys "0","1","2" all exist as own properties AND none of the real
+ * metadata field names do, treat as the spread-of-string artifact.
+ */
+function isCorruptedSpreadOfString(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const obj = value as Record<string, unknown>;
+  if (!('0' in obj) || !('1' in obj) || !('2' in obj)) return false;
+  // Known real metadata fields. Any one of them present means the object
+  // has at least some legitimate structure even if it also has stray
+  // numeric keys (which we'd rather keep than wipe).
+  const realKeys = ['tags', 'phase', 'metadata', 'tokenUsage', 'hasUnread', 'effortLevel', 'linkedTrackerItemIds'];
+  for (const k of realKeys) {
+    if (k in obj) return false;
+  }
+  return true;
+}
 
 /**
  * Expand @@[name](shortId) session mentions to @@[name](fullUuid).
@@ -432,6 +463,19 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
   const sessionData = useMemo(() => {
     if (!hasSessionData) return null;
     const snapshot = store.get(sessionStoreAtom(sessionId));
+    // Guard against corrupted metadata: some legacy rows have a metadata
+    // value that's the result of `{...stringValue, ...}`, producing an
+    // object with millions of numeric-string keys (each char of the
+    // original JSON as its own property). Spreading that into the
+    // memoized object below throws "RangeError: Too many properties to
+    // enumerate" and crashes the transcript. Sniff for the spread-of-
+    // string shape and fall back to an empty object rather than crashing.
+    // The underlying row should also be repaired DB-side, but this keeps
+    // the UI usable until then.
+    const rawMetadata = snapshot?.metadata;
+    const safeMetadata = isCorruptedSpreadOfString(rawMetadata)
+      ? {}
+      : (rawMetadata ?? {});
     return {
       ...(snapshot ?? {}),
       id: snapshot?.id ?? sessionId,
@@ -445,8 +489,8 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
       // we don't subscribe to it.
       updatedAt: snapshot?.updatedAt ?? 0,
       metadata: {
-        ...(snapshot?.metadata ?? {}),
-        effortLevel: rawEffortLevel ?? (snapshot?.metadata as Record<string, unknown> | undefined)?.effortLevel ?? null,
+        ...safeMetadata,
+        effortLevel: rawEffortLevel ?? (safeMetadata as Record<string, unknown> | undefined)?.effortLevel ?? null,
         sessionStatus,
         currentTeammates: metadataTeammates,
         currentTodos,
@@ -1094,20 +1138,6 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
     setRequestOpenSession(targetSessionId);
   }, [setRequestOpenSession]);
 
-  const getToolCallDiffs = useCallback(async (toolCallItemId: string, toolCallTimestamp?: number) => {
-    try {
-      const result = await window.electronAPI.invoke(
-        'session-files:get-tool-call-diffs',
-        sessionId,
-        toolCallItemId,
-        toolCallTimestamp
-      );
-      return result.success && result.diffs?.length > 0 ? result.diffs : null;
-    } catch {
-      return null;
-    }
-  }, [sessionId]);
-
   const handleOpenInExternalEditor = useCallback((filePath: string) => {
     openInExternalEditor(filePath);
   }, [openInExternalEditor]);
@@ -1742,21 +1772,32 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
     return userMessages[userMessages.length - 1].createdAt?.getTime() || null;
   }, [messages]);
 
-  // Slash command suggestions for empty sessions
+  // Extra content rendered in the empty-session panel: an inline contextual
+  // tip (any provider) above the slash command suggestions (claude-code
+  // only). InlineTipDisplay registers itself with TipProvider so tips only
+  // activate while this surface is mounted.
   const renderEmptyExtra = React.useCallback(() => {
-    if (provider !== 'claude-code' || messages.length > 0) {
-      return null;
-    }
+    if (messages.length > 0) return null;
     return (
-      <SlashCommandSuggestions
-        provider={provider}
-        hasMessages={messages.length > 0}
-        workspacePath={workspacePath}
-        sessionId={sessionId}
-        onCommandSelect={handleCommandSelect}
-      />
+      <div className="rich-transcript-empty-extras w-full max-w-[640px] flex flex-col items-center gap-6">
+        <InlineTipDisplay />
+        {provider === 'claude-code' && (
+          <SlashCommandSuggestions
+            provider={provider}
+            hasMessages={false}
+            workspacePath={workspacePath}
+            sessionId={sessionId}
+            onCommandSelect={handleCommandSelect}
+          />
+        )}
+      </div>
     );
   }, [provider, messages.length, workspacePath, sessionId, handleCommandSelect]);
+
+  // When a tip is being shown in the empty panel, hide the generic
+  // "ready to assist with" help block so the tip is the focal point.
+  const activeTipId = useAtomValue(activeTipIdAtom);
+  const hideEmptyHelp = activeTipId !== null && messages.length === 0;
 
   // Scroll-to-teammate: when the atom fires for this session, find the spawn
   // message and scroll the transcript to it.
@@ -2031,6 +2072,7 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
               showSessionInit: false
             }}
             renderEmptyExtra={renderEmptyExtra}
+            hideEmptyHelp={hideEmptyHelp}
             isArchived={isArchived}
             onCloseAndArchive={handleCloseAndArchive}
             onUnarchive={handleUnarchive}
@@ -2051,7 +2093,6 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
             currentTeammates={transcriptTeammates}
             waitingForNoun={waitingForNoun}
             appStartTime={appStartTime ?? undefined}
-            getToolCallDiffs={getToolCallDiffs}
             renderEmbeddedFile={renderEmbeddedFile}
             canEmbedFile={canEmbedFile}
             currentPhase={currentPhase}
