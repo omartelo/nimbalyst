@@ -415,7 +415,7 @@ function MultiSelectRenderer({
           >
             <span
               className={`w-4 h-4 mt-0.5 shrink-0 border rounded-sm flex items-center justify-center transition-colors ${
-                isSelected ? 'bg-nim-primary border-nim-primary text-white' : 'bg-nim border-nim text-nim-primary'
+                isSelected ? 'bg-nim-primary border-nim-primary text-nim-on-primary' : 'bg-nim border-nim text-nim-primary'
               }`}
             >
               {isSelected && (
@@ -1011,7 +1011,7 @@ function ConfirmRenderer({
     >
       <span
         className={`w-4 h-4 mt-0.5 shrink-0 border rounded-sm flex items-center justify-center transition-colors ${
-          value ? 'bg-nim-primary border-nim-primary text-white' : 'bg-nim border-nim text-nim-primary'
+          value ? 'bg-nim-primary border-nim-primary text-nim-on-primary' : 'bg-nim border-nim text-nim-primary'
         }`}
       >
         {value && (
@@ -1311,7 +1311,7 @@ export const RequestUserInputWidget: React.FC<CustomToolWidgetProps> = ({ messag
               data-testid="request-user-input-submit"
               onClick={handleSubmit}
               disabled={!allValid || isSubmitting}
-              className="px-4 py-1.5 rounded-md text-[13px] font-medium cursor-pointer border-none transition-colors duration-150 hover:opacity-90 bg-nim-primary text-white disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-1.5 rounded-md text-[13px] font-medium cursor-pointer border-none transition-colors duration-150 hover:opacity-90 bg-nim-primary text-nim-on-primary disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSubmitting ? 'Submitting...' : args.submitLabel ?? 'Confirm'}
             </button>

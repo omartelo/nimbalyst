@@ -35,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Primary buttons pick a readable label color on light/pastel theme accents instead of hardcoded white. (#504)
 - SQLite packaging fixes and validation using 'validate-packaged-sdkss.js' in afterPack
 - Three unit test files (`useDialogRequestTrigger`, `useDocumentModel`, `UnifiedOnboarding.ipcTimeout`) now declare `// @vitest-environment jsdom` so they run under jsdom after vitest v3 dropped `environmentMatchGlobs`.
 - PromptForUserInput widget no longer renders a "Cannot read properties of undefined (reading 'map')" error card when the agent emits a field without its required-by-type array; the MCP handler now rejects malformed fields with a precise error so the agent can retry, and the widget drops any malformed fields it sees as a safety net for historical sessions. (#494)
