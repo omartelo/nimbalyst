@@ -81,6 +81,11 @@ public struct SessionDetailView: View {
     /// Epoch ms of last local keystroke -- used to reject stale sync echoes.
     /// Mirrors desktop's sessionDraftLocalModifiedAtAtom pattern.
     @State private var lastLocalEditAt: Int = 0
+    /// Whether the compose TextField currently has keyboard focus. While true,
+    /// we never overwrite `composeText` from sync -- mutating the binding under
+    /// an active TextField reorders characters via IME/autocorrect/dictation
+    /// candidate buffers (the "jumbled while typing fast" bug).
+    @FocusState private var composeFocused: Bool
     /// Error message shown when prompt send fails.
     @State private var sendError: String?
     /// Warning shown when prompt was sent but desktop hasn't picked it up.
@@ -216,7 +221,8 @@ public struct SessionDetailView: View {
                 commands: projectCommands,
                 onSend: sendPrompt,
                 onCancel: cancelSession,
-                onQueue: { text, attachments in sendPrompt(text, attachments) }
+                onQueue: { text, attachments in sendPrompt(text, attachments) },
+                focused: $composeFocused
             )
         }
         .navigationTitle(displaySession.titleDecrypted ?? "Session")
@@ -257,36 +263,21 @@ public struct SessionDetailView: View {
             appState.syncManager?.markSessionRead(sessionId: session.id)
             AnalyticsManager.shared.capture("mobile_session_viewed")
         }
-        .onChange(of: liveSession?.draftInput) { newDraft in
-            // Apply synced draft from another device.
-            // Always apply (even if local compose has text) so cross-device sync wins.
-            // The isApplyingRemoteDraft flag prevents feedback loops, and the user's
-            // next local keystroke will immediately override via the debounced push.
-            let draft = newDraft ?? ""
-            guard draft != composeText else { return }
-            // Defense-in-depth: if the local compose already contains the
-            // incoming draft as a prefix, the user is ahead of the remote
-            // (almost always a self-echo arriving after they kept typing).
-            // Don't ever overwrite their input with a shorter prefix.
-            if !draft.isEmpty && composeText.hasPrefix(draft) && composeText.count > draft.count {
-                return
+        .onChange(of: liveSession?.draftInput) { _ in
+            // While the user is actively typing, never overwrite composeText from
+            // sync. Externally mutating the TextField binding while it is focused
+            // reorders characters via IME/autocorrect/dictation candidate buffers
+            // (the "jumbled while typing fast" bug). Pending remote drafts will be
+            // applied when focus is lost (see .onChange(of: composeFocused) below).
+            guard !composeFocused else { return }
+            applyRemoteDraftIfNewer()
+        }
+        .onChange(of: composeFocused) { focused in
+            // When the keyboard is dismissed, reconcile with any draft that
+            // arrived from another device while we were typing.
+            if !focused {
+                applyRemoteDraftIfNewer()
             }
-            // Reject stale drafts: if the remote draftUpdatedAt is older than our
-            // last submit, this is an echo of the pre-submit draft -- ignore it.
-            if let remoteTs = liveSession?.draftUpdatedAt, !draft.isEmpty, remoteTs <= lastSubmitAt {
-                return
-            }
-            // Reject sync echoes older than our local typing.
-            // When the user is actively typing, lastLocalEditAt advances ahead of
-            // any echoed drafts from the server. Only accept remote drafts that are
-            // genuinely newer (e.g., typed on desktop after we stopped typing here).
-            // This mirrors desktop's sessionDraftLocalModifiedAtAtom pattern.
-            if let remoteTs = liveSession?.draftUpdatedAt, lastLocalEditAt > 0, remoteTs <= lastLocalEditAt {
-                return
-            }
-            isApplyingRemoteDraft = true
-            composeText = draft
-            DispatchQueue.main.async { isApplyingRemoteDraft = false }
         }
         .onChange(of: session.id) { _ in
             resetTranscriptLoadState()
@@ -428,6 +419,36 @@ public struct SessionDetailView: View {
         hasObservedInitialMessages
             && !shouldWaitForInitialTranscriptMessages
             && (!messages.isEmpty || serverConfirmedNoMessages || !hasExpectedTranscriptMessages)
+    }
+
+    /// Apply the most recent synced draft to composeText if it represents
+    /// genuinely newer text than what we have locally. Callers MUST ensure the
+    /// TextField is not currently focused before calling this -- mutating the
+    /// binding under an active TextField scrambles the user's input.
+    private func applyRemoteDraftIfNewer() {
+        let draft = liveSession?.draftInput ?? ""
+        guard draft != composeText else { return }
+        // Defense-in-depth: if the local compose already contains the incoming
+        // draft as a prefix, the user is ahead of the remote (almost always a
+        // self-echo arriving after they kept typing). Don't ever overwrite
+        // their input with a shorter prefix.
+        if !draft.isEmpty && composeText.hasPrefix(draft) && composeText.count > draft.count {
+            return
+        }
+        // Reject stale drafts: if the remote draftUpdatedAt is older than our
+        // last submit, this is an echo of the pre-submit draft -- ignore it.
+        if let remoteTs = liveSession?.draftUpdatedAt, !draft.isEmpty, remoteTs <= lastSubmitAt {
+            return
+        }
+        // Reject sync echoes older than our local typing. Only accept remote
+        // drafts that are genuinely newer (e.g., typed on desktop after we
+        // stopped typing here). Mirrors desktop's sessionDraftLocalModifiedAtAtom.
+        if let remoteTs = liveSession?.draftUpdatedAt, lastLocalEditAt > 0, remoteTs <= lastLocalEditAt {
+            return
+        }
+        isApplyingRemoteDraft = true
+        composeText = draft
+        DispatchQueue.main.async { isApplyingRemoteDraft = false }
     }
 
     /// Re-check whether the transcript overlay can be dismissed.
