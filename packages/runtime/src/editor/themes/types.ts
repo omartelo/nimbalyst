@@ -56,6 +56,10 @@ export interface ThemeColors {
   // Primary (action/brand color)
   'primary': string;
   'primary-hover': string;
+  // Foreground used on top of `primary` / `primary-hover` backgrounds.
+  // Optional so existing extension themes don't need to declare it; when
+  // absent it is luminance-derived from `primary`.
+  'on-primary'?: string;
 
   // Links
   'link': string;

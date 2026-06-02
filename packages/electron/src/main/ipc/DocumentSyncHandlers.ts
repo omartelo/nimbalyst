@@ -39,6 +39,7 @@ import {
   recordLocalOriginShare,
   relinkLocalOriginBinding,
   reuploadFromLocalOrigin,
+  seedSharedDocumentFromContent,
 } from '../services/CollabLocalOriginService';
 import WebSocket from 'ws';
 
@@ -72,6 +73,71 @@ function getCollabPendingKey(orgId: string, documentId: string): string {
  */
 const senderDestroyedHooked = new Set<number>();
 
+// Single-flight + TTL cache for the org-key-fingerprint verify call.
+// The fingerprint endpoint is per-org, not per-document, so one check
+// per org per short window is enough. Without this, opening N tracker
+// bodies in parallel at startup fires N HTTPS calls that saturate
+// Node's HTTPS agent socket pool and produce a multi-minute event-loop
+// block (user report 2026-06-01: 162-second beachball on a workspace
+// with ~14 restored tracker tabs + a 50-item prewarm).
+type FingerprintVerifyResult = { ok: true } | { ok: false; error: string };
+const fingerprintVerifyCache: Map<string, { promise: Promise<FingerprintVerifyResult>; expiresAt: number }> = new Map();
+const FINGERPRINT_VERIFY_TTL_MS = 60_000;
+
+/** Drop the verify cache for an org (or all orgs). Called by key rotation. */
+export function invalidateFingerprintVerifyCache(orgId?: string): void {
+  if (orgId) fingerprintVerifyCache.delete(orgId);
+  else fingerprintVerifyCache.clear();
+}
+
+async function verifyOrgKeyFingerprintCached(orgId: string): Promise<FingerprintVerifyResult> {
+  const now = Date.now();
+  const cached = fingerprintVerifyCache.get(orgId);
+  if (cached && cached.expiresAt > now) return cached.promise;
+
+  const promise: Promise<FingerprintVerifyResult> = (async () => {
+    const localFingerprint = getOrgKeyFingerprint(orgId);
+    if (!localFingerprint) return { ok: true };
+    try {
+      const orgJwt = await getOrgScopedJwt(orgId);
+      const serverUrl = getCollabSyncHttpUrl();
+      const fpResp = await net.fetch(`${serverUrl}/api/teams/${orgId}/org-key-fingerprint`, {
+        headers: { 'Authorization': `Bearer ${orgJwt}` },
+      });
+      if (!fpResp.ok) return { ok: true };
+      const fpData = await fpResp.json() as { fingerprint: string | null };
+      if (fpData.fingerprint && fpData.fingerprint !== localFingerprint) {
+        logger.main.warn('[DocumentSyncHandlers] Stale key detected!', {
+          local: localFingerprint.slice(0, 12),
+          server: fpData.fingerprint.slice(0, 12),
+        });
+        clearOrgKey(orgId);
+        const freshOrgJwt = await getOrgScopedJwt(orgId);
+        const refreshed = await fetchAndUnwrapOrgKey(orgId, freshOrgJwt);
+        if (!refreshed) {
+          return { ok: false, error: 'Key rotation occurred. Unable to fetch new encryption key.' };
+        }
+      }
+      return { ok: true };
+    } catch (err) {
+      logger.main.error('[DocumentSyncHandlers] Failed to verify key fingerprint against server:', err);
+      return { ok: false, error: 'Cannot verify encryption key epoch against server. Check your network connection and try again.' };
+    }
+  })();
+
+  fingerprintVerifyCache.set(orgId, { promise, expiresAt: now + FINGERPRINT_VERIFY_TTL_MS });
+  // Drop cache on failure so a transient network blip doesn't pin a sad
+  // result for the full TTL window.
+  void promise.then((result) => {
+    if (!result.ok) {
+      const entry = fingerprintVerifyCache.get(orgId);
+      if (entry?.promise === promise) fingerprintVerifyCache.delete(orgId);
+    }
+  });
+
+  return promise;
+}
+
 /** Build a human-readable display name from Stytch user data. Falls back to email, then userId. */
 function getUserDisplayName(userId: string): string {
   const auth = getAuthState();
@@ -95,6 +161,20 @@ export function registerDocumentSyncHandlers(): void {
     title?: string;
     documentType?: string;
   }) => {
+    // Phase timing. safeHandle already emits IpcSlow when the whole call
+    // exceeds 1s, but doesn't say WHICH sub-step (team lookup vs envelope
+    // fetch vs fingerprint check) ate the budget. The shortDocId tag lets
+    // us correlate phases across the many document-sync:open calls that
+    // fire at startup when restoring open tabs.
+    const handlerStart = Date.now();
+    const shortDocId = payload.documentId?.slice(0, 8) ?? '?';
+    const logPhase = (phase: string, since: number) => {
+      const ms = Date.now() - since;
+      if (ms >= 200) {
+        logger.main.info(`[DocumentSyncHandlers] open(${shortDocId}) ${phase}: ${ms}ms`);
+      }
+    };
+
     if (!isAuthenticated()) {
       return { success: false, error: 'Not authenticated. Sign in first.' };
     }
@@ -105,13 +185,16 @@ export function registerDocumentSyncHandlers(): void {
     }
 
     // Find team for workspace
+    const teamStart = Date.now();
     const team = await findTeamForWorkspace(payload.workspacePath);
+    logPhase('findTeamForWorkspace', teamStart);
     if (!team) {
       return { success: false, error: 'No team found for this workspace. Create or join a team first.' };
     }
     const orgId = team.orgId;
 
     // Get org encryption key
+    const keyStart = Date.now();
     let encryptionKey = await getOrgKey(orgId);
     if (!encryptionKey) {
       logger.main.info('[DocumentSyncHandlers] No org key cached, attempting to fetch envelope...');
@@ -127,39 +210,24 @@ export function registerDocumentSyncHandlers(): void {
         return { success: false, error: 'No encryption key available. Team admin may need to re-share keys.' };
       }
     }
+    logPhase('getOrgKey/fetchEnvelope', keyStart);
 
-    // Verify local key fingerprint against server to detect stale keys
-    const localFingerprint = getOrgKeyFingerprint(orgId);
-    if (localFingerprint) {
-      try {
-        const orgJwt = await getOrgScopedJwt(orgId);
-        const { net } = await import('electron');
-        const serverUrl = getCollabSyncHttpUrl();
-        const fpResp = await net.fetch(`${serverUrl}/api/teams/${orgId}/org-key-fingerprint`, {
-          headers: { 'Authorization': `Bearer ${orgJwt}` },
-        });
-        if (fpResp.ok) {
-          const fpData = await fpResp.json() as { fingerprint: string | null };
-          if (fpData.fingerprint && fpData.fingerprint !== localFingerprint) {
-            logger.main.warn('[DocumentSyncHandlers] Stale key detected! Local:', localFingerprint.slice(0, 12), 'Server:', fpData.fingerprint.slice(0, 12));
-            // Clear stale key and re-fetch
-            clearOrgKey(orgId);
-            const freshOrgJwt = await getOrgScopedJwt(orgId);
-            encryptionKey = await fetchAndUnwrapOrgKey(orgId, freshOrgJwt);
-            if (!encryptionKey) {
-              return { success: false, error: 'Key rotation occurred. Unable to fetch new encryption key.' };
-            }
-          }
-        }
-      } catch (err) {
-        logger.main.error('[DocumentSyncHandlers] Failed to verify key fingerprint against server:', err);
-        return { success: false, error: 'Cannot verify encryption key epoch against server. Check your network connection and try again.' };
-      }
+    // Verify local key fingerprint against server to detect stale keys.
+    // Single-flight + 60s TTL per orgId; see verifyOrgKeyFingerprintCached.
+    const fpStart = Date.now();
+    const fpResult = await verifyOrgKeyFingerprintCached(orgId);
+    logPhase('verifyFingerprint', fpStart);
+    if (!fpResult.ok) return { success: false, error: fpResult.error };
+    // Re-read the key in case the cached verify rotated it for this org.
+    encryptionKey = await getOrgKey(orgId);
+    if (!encryptionKey) {
+      return { success: false, error: 'No encryption key available.' };
     }
 
     // Export key as raw base64 for renderer to reconstruct
     const rawBytes = await crypto.subtle.exportKey('raw', encryptionKey!);
     const orgKeyBase64 = Buffer.from(rawBytes).toString('base64');
+    logPhase('total', handlerStart);
 
     const serverUrl = getCollabSyncWsUrl();
     const workspaceState = getWorkspaceState(payload.workspacePath);
@@ -455,6 +523,20 @@ export function registerDocumentSyncHandlers(): void {
       };
     });
     return { success: true };
+  });
+
+  safeHandle('document-sync:seed-shared-document', async (_event, payload: {
+    workspacePath: string;
+    documentId: string;
+    documentType: string;
+    content: string;
+  }) => {
+    try {
+      const ok = await seedSharedDocumentFromContent(payload);
+      return { success: ok };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   safeHandle('document-sync:get-local-origin', async (_event, payload: {

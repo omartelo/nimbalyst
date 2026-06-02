@@ -52,6 +52,7 @@ const lightThemeColors: ExtendedThemeColors = {
   // Primary
   'primary': '#3b82f6',
   'primary-hover': '#2563eb',
+  'on-primary': '#ffffff',
 
   // Links
   'link': 'rgb(33, 111, 219)',
@@ -162,6 +163,7 @@ const darkThemeColors: ExtendedThemeColors = {
   // Primary
   'primary': '#60a5fa',
   'primary-hover': '#3b82f6',
+  'on-primary': '#0b1220',
 
   // Links
   'link': '#60a5fa',

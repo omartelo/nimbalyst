@@ -14,6 +14,7 @@ import path from "path";
 import { existsSync } from "fs";
 import { BrowserWindow } from 'electron';
 import { safeHandle, safeOn } from '../utils/ipcRegistry';
+import { parseJsonObjectColumn } from '../utils/jsonColumn';
 import type { SessionCreateResult } from '../../shared/ipc/types';
 import { TrayManager } from '../tray/TrayManager';
 import { AnalyticsService } from '../services/analytics/AnalyticsService';
@@ -22,6 +23,8 @@ import {
     getGitCommitProposalResponseChannel,
     resolveGitCommitProposalPromptId,
 } from '../services/ai/gitCommitProposalPromptUtils';
+import { enrichTranscriptMessagesWithToolCallDiffs } from '../services/TranscriptToolCallEnricher';
+import { setSessionPendingPrompt } from '../services/ai/pendingPromptPersistence';
 
 // Initialize session manager
 const sessionManager = new SessionManager();
@@ -130,13 +133,18 @@ async function getSessionsForUncommittedFiles(
             candidatePaths.push(`${workspacePath}/${relativePath}`);
         }
 
+        // Pick the most recent session per file_path. Rewritten from PG's
+        // `SELECT DISTINCT ON (file_path) ... ORDER BY file_path, timestamp DESC`
+        // to a window-function form that works under both PGLite and SQLite.
         const { rows } = await database.query<{ session_id: string; file_path: string }>(
-            `SELECT DISTINCT ON (file_path) session_id, file_path
-             FROM session_files
-             WHERE workspace_id = $1
-               AND link_type = 'edited'
-               AND file_path = ANY($2::text[])
-             ORDER BY file_path, timestamp DESC`,
+            `SELECT session_id, file_path FROM (
+               SELECT session_id, file_path,
+                      ROW_NUMBER() OVER (PARTITION BY file_path ORDER BY timestamp DESC) AS rn
+               FROM session_files
+               WHERE workspace_id = $1
+                 AND link_type = 'edited'
+                 AND file_path = ANY($2::text[])
+             ) ranked WHERE rn = 1`,
             [workspacePath, candidatePaths]
         );
 
@@ -562,8 +570,7 @@ export async function registerSessionHandlers() {
                     childCount: entry.childCount || 0,  // Number of child sessions
                     uncommittedCount,  // Number of uncommitted files
                     hasUnread: entry.hasUnread || false,  // Unread state from metadata
-                    hasPendingQuestion: (entry as any).hasPendingQuestion || false,  // Pending AskUserQuestion state from metadata
-                    hasPendingInteractivePrompt: (entry as any).hasPendingQuestion || false,
+                    hasPendingInteractivePrompt: (entry as any).hasPendingInteractivePrompt || false,
                     // Branch tracking - SEPARATE from hierarchical parentSessionId
                     branchedFromSessionId: entry.branchedFromSessionId,
                     branchPointMessageId: entry.branchPointMessageId,
@@ -602,7 +609,8 @@ export async function registerSessionHandlers() {
                 `SELECT s.id, s.provider, s.model, s.session_type, s.mode, s.agent_role, s.created_by_session_id, s.title, s.workspace_id,
                         s.worktree_id, s.parent_session_id, s.created_at, s.updated_at, s.is_archived, s.is_pinned,
                         s.metadata,
-                        COUNT(m.id) as message_count
+                        COUNT(m.id) as message_count,
+                        (SELECT COUNT(*) FROM ai_sessions cs WHERE cs.parent_session_id = s.id) as child_count
                  FROM ai_sessions s
                  LEFT JOIN ai_agent_messages m ON s.id = m.session_id AND m.direction = 'input' AND (m.hidden = FALSE OR m.hidden IS NULL)
                  WHERE s.parent_session_id = $1 AND s.workspace_id = $2
@@ -636,19 +644,32 @@ export async function registerSessionHandlers() {
             }
 
             const children = rows.map((row: any) => {
-                const metadata = row.metadata ?? {};
+                // SQLite returns TEXT columns as raw strings; PGLite returns
+                // JSONB columns already parsed. Without this, phase/tags/
+                // linkedTrackerItemIds silently disappear from the sidebar.
+                const metadata = parseJsonObjectColumn(row.metadata);
                 return {
                     id: row.id,
                     title: row.title || 'Untitled Session',
                     provider: row.provider,
                     model: row.model,
+                    sessionType: row.session_type || 'session',
+                    mode: row.mode || null,
                     agentRole: row.agent_role || 'standard',
                     createdBySessionId: row.created_by_session_id || null,
                     createdAt: row.created_at instanceof Date ? row.created_at.getTime() : new Date(row.created_at).getTime(),
                     updatedAt: row.updated_at instanceof Date ? row.updated_at.getTime() : new Date(row.updated_at).getTime(),
+                    workspaceId: row.workspace_id,
+                    worktreeId: row.worktree_id || null,
                     parentSessionId: row.parent_session_id,
                     isArchived: row.is_archived || false,
                     isPinned: row.is_pinned || false,
+                    messageCount: typeof row.message_count === 'string'
+                        ? parseInt(row.message_count, 10) || 0
+                        : (row.message_count || 0),
+                    childCount: typeof row.child_count === 'string'
+                        ? parseInt(row.child_count, 10) || 0
+                        : (row.child_count || 0),
                     uncommittedCount: uncommittedMap.get(row.id) || 0,
                     // Metadata fields needed by TrackerPanel, kanban, etc.
                     phase: metadata.phase || undefined,
@@ -1275,6 +1296,28 @@ export async function registerSessionHandlers() {
                 ]
             );
 
+            // Drive the canonical transformer forward immediately so the
+            // associated tool_call event (e.g. developer_git_commit_proposal)
+            // flips from running -> completed before the renderer next reads
+            // the transcript. Without this we depend on the next SDK chunk's
+            // scheduleTranscriptProcessing to pick up the row, which has
+            // race-with-write-coalescing failure modes that leave the widget
+            // stuck on "pending" after a successful commit (session
+            // cb82f2eb-941c-4fb5-b552-adbae567df61 / 68a60f57). Best-effort:
+            // if the service isn't ready, the next chunk catches up.
+            if (TranscriptMigrationRepository.hasService()) {
+                try {
+                    const session = await AISessionsRepository.get(sessionId);
+                    const provider = session?.provider ?? 'claude-code';
+                    await TranscriptMigrationRepository.getService().processNewMessages(
+                        sessionId,
+                        provider,
+                    );
+                } catch (err) {
+                    console.warn('[SessionHandlers] processNewMessages after prompt response failed:', err);
+                }
+            }
+
             // Codex currently may not emit a follow-up item.completed event for
             // long-blocking MCP tools after interactive approval. Persist a
             // synthetic completion event so transcript replay shows committed state.
@@ -1418,6 +1461,14 @@ export async function registerSessionHandlers() {
                 TrayManager.getInstance().onPromptResolved(sessionId);
             }
 
+            // Authoritative clear for the persisted "pending prompt" bit.
+            // Covers all prompt types resolved via this handler so the next
+            // session-list refresh on this or any other device sees the
+            // session as idle. The runtime atom clear paths in
+            // sessionStateListeners are still in place; this is the durable
+            // backstop that survives renderer reloads and reaches mobile.
+            void setSessionPendingPrompt(sessionId, false);
+
             return { success: true, responseContent };
         } catch (error) {
             console.error('[SessionHandlers] Failed to respond to prompt:', error);
@@ -1465,14 +1516,18 @@ export async function registerSessionHandlers() {
     // ============================================================
 
     safeHandle('transcript:list-user-prompts', async (_event, workspacePath: string, limit: number = 2000) => {
+        // Phase 3 of canonical-transcript-deprecation: ai_transcript_events is
+        // going away. The cross-session "list all user prompts" query now reads
+        // ai_agent_messages directly, filtering on the message_kind column
+        // populated by the searchable-text extractor.
         const { database } = await import('../database/PGLiteDatabaseWorker');
         const { rows } = await database.query(`
             SELECT t.id, t.session_id, t.searchable_text, t.created_at,
                    s.title, s.provider, s.parent_session_id
-            FROM ai_transcript_events t
+            FROM ai_agent_messages t
             JOIN ai_sessions s ON t.session_id = s.id
-            WHERE t.event_type = 'user_message'
-              AND t.searchable = TRUE
+            WHERE t.message_kind = 'user'
+              AND t.searchable_text IS NOT NULL
               AND s.workspace_id = $1
             ORDER BY t.created_at DESC
             LIMIT $2
@@ -1507,7 +1562,7 @@ export async function registerSessionHandlers() {
         );
 
         const viewModel = TranscriptProjector.project(tailEvents);
-        return viewModel.messages;
+        return await enrichTranscriptMessagesWithToolCallDiffs(sessionId, viewModel.messages);
     });
 
     // DEV/TESTING ONLY: Force a single session's canonical events to be

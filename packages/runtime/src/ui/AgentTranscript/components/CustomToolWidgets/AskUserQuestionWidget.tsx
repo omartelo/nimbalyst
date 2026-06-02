@@ -470,7 +470,7 @@ export const AskUserQuestionWidget: React.FC<CustomToolWidgetProps> = ({
                       >
                         <div className={`w-4 h-4 mt-0.5 shrink-0 border rounded-sm flex items-center justify-center ${
                           isSelected
-                            ? 'bg-nim-primary border-nim-primary text-white'
+                            ? 'bg-nim-primary border-nim-primary text-nim-on-primary'
                             : 'bg-nim border-nim text-nim-primary'
                         }`}>
                           {isSelected && (
@@ -502,32 +502,13 @@ export const AskUserQuestionWidget: React.FC<CustomToolWidgetProps> = ({
     );
   }
 
-  // If no host available, show non-interactive pending state
-  if (!host) {
-    return (
-      <div
-        data-testid="ask-user-question-widget"
-        data-state="pending"
-        className="ask-user-question-widget rounded-lg bg-nim-secondary border border-nim-primary overflow-hidden"
-      >
-        <div className="flex items-center gap-2 py-3 px-4 bg-nim-tertiary">
-          <div className="w-5 h-5 text-nim-primary shrink-0">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" className="w-full h-full">
-              <path d="M8 14A6 6 0 1 0 8 2a6 6 0 0 0 0 12z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-              <path d="M6.06 6a2 2 0 0 1 3.88.67c0 1.33-2 2-2 2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-              <path d="M8 11h.01" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-          </div>
-          <span className="text-sm font-semibold text-nim flex-1">
-            Questions from Claude
-          </span>
-          <span data-testid="ask-user-question-pending" className="text-xs text-nim-muted">Waiting...</span>
-        </div>
-      </div>
-    );
-  }
-
-  // Show interactive UI for pending request
+  // Show interactive UI for pending request.
+  // If the host is momentarily unavailable (e.g. SessionTranscript's host effect
+  // re-ran and hasn't yet re-populated the atom after a mode switch), still
+  // render the questions so the user can read them and pre-stage answers --
+  // only disable Submit/Cancel until the host arrives. Previously this branch
+  // returned a bare "Waiting..." header with no question body, which made the
+  // widget look broken after switching to Files mode and back.
   return (
     <div
       data-testid="ask-user-question-widget"
@@ -545,6 +526,9 @@ export const AskUserQuestionWidget: React.FC<CustomToolWidgetProps> = ({
         <span className="text-sm font-semibold text-nim flex-1">
           Questions from Claude
         </span>
+        {!host && (
+          <span data-testid="ask-user-question-pending" className="text-xs text-nim-muted">Waiting...</span>
+        )}
       </div>
 
       <div className="p-3 flex flex-col gap-3">
@@ -583,7 +567,7 @@ export const AskUserQuestionWidget: React.FC<CustomToolWidgetProps> = ({
                     >
                       <div className={`w-4 h-4 mt-0.5 shrink-0 border rounded-sm flex items-center justify-center transition-colors ${
                         isSelected
-                          ? 'bg-nim-primary border-nim-primary text-white'
+                          ? 'bg-nim-primary border-nim-primary text-nim-on-primary'
                           : 'bg-nim border-nim text-nim-primary'
                       }`}>
                         {isSelected && (
@@ -619,7 +603,7 @@ export const AskUserQuestionWidget: React.FC<CustomToolWidgetProps> = ({
                   >
                     <div className={`w-4 h-4 mt-0.5 shrink-0 border rounded-sm flex items-center justify-center transition-colors ${
                       otherSelected[question.question]
-                        ? 'bg-nim-primary border-nim-primary text-white'
+                        ? 'bg-nim-primary border-nim-primary text-nim-on-primary'
                         : 'bg-nim border-nim text-nim-primary'
                     }`}>
                       {otherSelected[question.question] && (
@@ -662,7 +646,7 @@ export const AskUserQuestionWidget: React.FC<CustomToolWidgetProps> = ({
             type="button"
             data-testid="ask-user-question-cancel"
             onClick={handleCancel}
-            disabled={isSubmitting}
+            disabled={isSubmitting || !host}
             className="px-3 py-1.5 rounded-md text-[13px] cursor-pointer border border-nim transition-colors duration-150 hover:bg-nim-hover bg-nim-tertiary text-nim-muted disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Cancel
@@ -671,8 +655,8 @@ export const AskUserQuestionWidget: React.FC<CustomToolWidgetProps> = ({
             type="button"
             data-testid="ask-user-question-submit"
             onClick={handleSubmit}
-            disabled={!allAnswered || isSubmitting}
-            className="px-4 py-1.5 rounded-md text-[13px] font-medium cursor-pointer border-none transition-colors duration-150 hover:opacity-90 bg-nim-primary text-white disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!allAnswered || isSubmitting || !host}
+            className="px-4 py-1.5 rounded-md text-[13px] font-medium cursor-pointer border-none transition-colors duration-150 hover:opacity-90 bg-nim-primary text-nim-on-primary disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isSubmitting ? 'Submitting...' : 'Submit'}
           </button>

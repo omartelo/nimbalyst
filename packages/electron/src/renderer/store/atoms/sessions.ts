@@ -114,6 +114,22 @@ export const sessionUnreadAtom = atomFamily((_sessionId: string) =>
 );
 
 /**
+ * Per-session "last activity" timestamp.
+ *
+ * Bumped on every `ai:message-logged` IPC event. SessionListItem (and the
+ * group rows that render a relative-time label) subscribes to this so its
+ * "5m ago" label can tick during streaming without forcing a re-render of
+ * `SessionHistory` or the 705 other sessions in the registry.
+ *
+ * Initial value `0` means "no activity recorded this session" — the
+ * displayed timestamp falls back to the registry's `updatedAt` from the
+ * last DB refresh.
+ */
+export const sessionLastActivityAtom = atomFamily((_sessionId: string) =>
+  atom(0)
+);
+
+/**
  * Per-session pending prompt state.
  * Set when there's a queued prompt waiting to be processed.
  * SessionListItem subscribes to show pending indicator.
@@ -2093,10 +2109,12 @@ export const refreshSessionListAtom = atom(
           if (s.hasUnread) {
             set(sessionUnreadAtom(s.id), true);
           }
-          // Initialize pending interactive prompt state from database metadata (for sidebar indicator persistence)
-          if (s.hasPendingQuestion || s.hasPendingInteractivePrompt) {
-            set(sessionHasPendingInteractivePromptAtom(s.id), true);
-          }
+          // Rehydrate the pending-interactive-prompt indicator from the
+          // authoritative DB field. Write BOTH directions so a stuck-true
+          // atom (e.g. from a missed resolve event after a renderer reload)
+          // gets corrected on the next session-list refresh. Persisted by
+          // main-process setSessionPendingPrompt on every prompt open/resolve.
+          set(sessionHasPendingInteractivePromptAtom(s.id), !!s.hasPendingInteractivePrompt);
         }
 
         set(sessionRegistryAtom, registry);

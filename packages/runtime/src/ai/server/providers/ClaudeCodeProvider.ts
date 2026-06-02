@@ -45,6 +45,7 @@ import {
 } from '../../modelConstants';
 import { isBedrockToolSearchError } from '../utils/errorDetection';
 import { AgentMessagesRepository } from '../../../storage/repositories/AgentMessagesRepository';
+import { TranscriptMigrationRepository } from '../../../storage/repositories/TranscriptMigrationRepository';
 import { TeammateManager, type TeammateToLeadMessage } from './TeammateManager';
 import path from 'path';
 import os from 'os';
@@ -65,6 +66,7 @@ import {
 import {
   applyToolResultToToolCall,
   isSearchableAssistantChunk,
+  isTransientClaudeCodeChunk,
 } from './claudeCode/toolChunkUtils';
 import {
   INTERNAL_MCP_TOOLS,
@@ -120,6 +122,16 @@ const SDK_NATIVE_TOOLS: readonly string[] = [
   'ListMcpResources', 'ListMcpResourcesTool',
   'ReadMcpResource', 'ReadMcpResourceTool',
   'Config', 'Mcp',
+];
+
+/**
+ * Tools the CLI emits as tool_use but Nimbalyst services handle as a side effect
+ * inside this provider (see the `tool_use` switch). Their tool_result from the CLI
+ * is informational only -- routing them through `this.toolHandler` would throw
+ * "Unknown tool", so we treat them like SDK_NATIVE_TOOLS for the warn/route check.
+ */
+const NIMBALYST_HANDLED_TOOLS: readonly string[] = [
+  'ScheduleWakeup',
 ];
 
 /**
@@ -863,8 +875,12 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           }
 
           // Log raw SDK chunks to database (non-blocking for streaming performance)
-          // Extract SDK-provided uuid for deduplication in sync
-          if (sessionId) {
+          // Extract SDK-provided uuid for deduplication in sync.
+          // Skip transient chunk types (hook lifecycle, task progress, tool_progress,
+          // auth_status, rate_limit_event): the live dispatch loop above already
+          // reacted to them, and the persistent reparse path (ClaudeCodeRawParser)
+          // ignores them, so persisting just inflates ai_agent_messages + sync churn.
+          if (sessionId && !isTransientClaudeCodeChunk(chunk)) {
             const rawChunkJson = typeof chunk === 'string'
               ? JSON.stringify({ type: 'text', content: chunk })
               : JSON.stringify(chunk);
@@ -876,6 +892,17 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
             const isSearchable = isSearchableAssistantChunk(chunk);
 
             this.logAgentMessageNonBlocking(sessionId, 'claude-code', 'output', rawChunkJson, undefined, hideMessages, providerMessageId, isSearchable);
+            // Drive incremental transcript transformation. Without this, the
+            // canonical store only advances on the next aiLoadSession from
+            // the renderer, which never fires when the user's active session
+            // isn't this one -- so widgets keyed on canonical events (e.g.
+            // developer_git_commit_proposal's GitCommitConfirmationWidget)
+            // never appear when a turn pauses mid-stream waiting on user
+            // input. Fire-and-forget so the chunk loop stays responsive;
+            // the per-session lock inside TranscriptTransformer serializes
+            // concurrent calls and the next chunk picks up anything that
+            // hadn't flushed in time.
+            this.scheduleTranscriptProcessing(sessionId);
           }
 
           // if (chunkCount <= 5) {
@@ -951,8 +978,9 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
                 }
 
                 const isSdkNativeTool = SDK_NATIVE_TOOLS.includes(toolName);
-                if (!toolName || isMcp || isSdkNativeTool || isSubagent) {
-                  // Handled by SDK or is a subagent spawn
+                const isNimbalystHandled = NIMBALYST_HANDLED_TOOLS.includes(toolName);
+                if (!toolName || isMcp || isSdkNativeTool || isNimbalystHandled || isSubagent) {
+                  // Handled by SDK, a subagent spawn, or a Nimbalyst side-effect handler above
                 } else if (this.toolHandler) {
                   // Unknown, non-MCP, non-whitelisted tool. Almost always means Anthropic
                   // added a new CLI-native tool we haven't added to SDK_NATIVE_TOOLS yet.
@@ -1053,6 +1081,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
                   };
 
                   await this.flushPendingWrites();
+                  if (sessionId) await this.processTranscriptMessages(sessionId);
                   yield { type: 'complete', isComplete: true };
                   breakOuter = true;
                   break;
@@ -1148,6 +1177,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           // requests, but the consumer sees completion immediately.
           if (typeof chunk === 'object' && chunk !== null && chunk.type === 'result' && !completeEmitted) {
             await this.flushPendingWrites();
+            if (sessionId) await this.processTranscriptMessages(sessionId);
 
             if (this.toolHooksService && this.toolHooksService.getEditedFiles().size > 0) {
               await this.toolHooksService.createTurnEndSnapshots();
@@ -1349,6 +1379,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         // before the final messages (e.g. compact_boundary, continuation, result)
         // have been committed, causing a stale transcript.
         await this.flushPendingWrites();
+        if (sessionId) await this.processTranscriptMessages(sessionId);
 
         // Create snapshots for all files edited during this turn
         if (this.toolHooksService && this.toolHooksService.getEditedFiles().size > 0) {
@@ -1436,6 +1467,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
       if (isAbort) {
         // Abort is expected - user cancelled, don't log as error
         await this.flushPendingWrites();
+        if (sessionId) await this.processTranscriptMessages(sessionId);
         if (!completeEmitted) {
           yield {
             type: 'complete',
@@ -1479,6 +1511,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
         // is already cleaned up; this error was raised after the turn was
         // delivered (e.g. teammate streamInput failure).
         await this.flushPendingWrites();
+        if (sessionId) await this.processTranscriptMessages(sessionId);
         if (!completeEmitted) {
           yield {
             type: 'complete'
@@ -1573,6 +1606,56 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
    * Uses two undocumented SDK methods (generateSessionTitle and askSideQuestion
    * exist in 0.2.117 runtime but are not on the public sdk.d.ts surface).
    */
+
+  // Per-session "transcript processing already scheduled" flag. The streaming
+  // chunk loop fires scheduleTranscriptProcessing per chunk, so without this
+  // we'd queue one processNewMessages run per chunk; the per-session lock
+  // inside TranscriptTransformer would serialize them, but we'd still pay N
+  // DB roundtrips for what could have been one. Setting the flag at schedule
+  // time and clearing it when the run starts coalesces bursts of chunks into
+  // at most one in-flight run + one queued run per session.
+  private transcriptProcessingScheduled: Set<string> = new Set();
+
+  /**
+   * Schedule a non-blocking pass over any unprocessed rows in
+   * ai_agent_messages for this session. Mirrors what OpenCodeProvider,
+   * CopilotCLIProvider, and OpenAICodexACPProvider do synchronously, but
+   * fired-and-forgotten so the high-throughput Claude Code chunk loop stays
+   * responsive. End-of-turn callers should still `await
+   * processTranscriptMessages` directly to guarantee post-flush consistency.
+   */
+  private scheduleTranscriptProcessing(sessionId: string): void {
+    if (!TranscriptMigrationRepository.hasService()) return;
+    if (this.transcriptProcessingScheduled.has(sessionId)) return;
+    this.transcriptProcessingScheduled.add(sessionId);
+    queueMicrotask(() => {
+      this.transcriptProcessingScheduled.delete(sessionId);
+      void this.processTranscriptMessages(sessionId);
+    });
+  }
+
+  /**
+   * Drive the canonical transcript transformer forward for this session.
+   * Best-effort: failures here must not abort the streaming turn, and the
+   * next call (or end-of-turn aiLoadSession from the renderer) will catch
+   * up. Without this, canonical events only get materialized when the
+   * renderer's active session is read, so mid-turn widgets (the commit
+   * proposal pending widget, AskUserQuestion, ExitPlanMode) never appear
+   * when the user is viewing a different session.
+   */
+  private async processTranscriptMessages(sessionId: string): Promise<void> {
+    try {
+      if (TranscriptMigrationRepository.hasService()) {
+        await TranscriptMigrationRepository.getService().processNewMessages(
+          sessionId,
+          'claude-code',
+        );
+      }
+    } catch {
+      // Best effort -- next chunk or post-flush call will catch up.
+    }
+  }
+
   private async maybeFireSessionNamingSideQuestion(
     queryRef: Query,
     sessionId: string,
