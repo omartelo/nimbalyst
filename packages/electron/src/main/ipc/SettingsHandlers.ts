@@ -30,6 +30,7 @@ import {
     getRestorePreviousProjectsOnLaunch, setRestorePreviousProjectsOnLaunch,
     getOnboardingState, updateOnboardingState,
     isDeveloperMode, setDeveloperMode,
+    isVimMode, setVimMode,
     isFeatureWalkthroughCompleted, setFeatureWalkthroughCompleted,
     isWorktreeOnboardingShown, setWorktreeOnboardingShown,
     getClaudeCodeSettings,
@@ -440,6 +441,15 @@ export function registerSettingsHandlers() {
 
     safeHandle('developer-mode:set', async (_event, enabled: boolean) => {
         setDeveloperMode(enabled);
+    });
+
+    // Vim mode (global app setting) — toggles monaco-vim wrapper in code editor
+    safeHandle('vim-mode:get', async () => {
+        return isVimMode();
+    });
+
+    safeHandle('vim-mode:set', async (_event, enabled: boolean) => {
+        setVimMode(enabled);
     });
 
     // Feature walkthrough state (shown on first launch)

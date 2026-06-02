@@ -83,3 +83,38 @@
 .monaco-code-editor[data-diff-mode="true"] .editor.original .margin-view-overlays {
   background-color: var(--nim-bg-tertiary) !important;
 }
+
+/*
+ * monaco-vim status bar. Rendered below the Editor when vim mode is on; sits
+ * outside the Editor's flex:1 child so it does not steal Monaco's height.
+ */
+.monaco-code-editor .monaco-vim-status-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 10px;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--nim-text);
+  background-color: var(--nim-bg-secondary);
+  border-top: 1px solid var(--nim-border);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.monaco-code-editor .monaco-vim-status-bar input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--nim-text);
+  font-family: inherit;
+  font-size: inherit;
+  padding: 0;
+}
+
+.monaco-code-editor .monaco-vim-status-bar span {
+  white-space: pre;
+}

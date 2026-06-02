@@ -38,6 +38,9 @@ export interface MonacoEditorConfig {
 
   /** Optional transform from visible editor content back to stored file content */
   transformSaveContent?: (content: string) => string;
+
+  /** When true, attach monaco-vim to the underlying editor. */
+  vimMode?: boolean;
 }
 
 export interface MonacoEditorProps {
@@ -226,6 +229,7 @@ export function MonacoEditor({
       extensionThemeId={config.extensionThemeId}
       isActive={config.isActive}
       editorOptions={config.editorOptions}
+      vimModeEnabled={config.vimMode ?? false}
       onDirtyChange={handleDirtyChange}
       onGetContent={handleGetContent}
       onEditorReady={handleEditorReady}

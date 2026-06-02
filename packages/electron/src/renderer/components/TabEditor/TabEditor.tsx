@@ -12,7 +12,9 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
+import { useAtomValue } from 'jotai';
 import { usePostHog } from 'posthog-js/react';
+import { vimModeAtom } from '../../store/atoms/appSettings';
 import type { ConfigTheme } from '@nimbalyst/runtime';
 import { DocumentPathProvider, MarkdownEditor, MonacoEditor, MonacoCodeEditor } from '@nimbalyst/runtime';
 import { useTheme } from '../../hooks/useTheme';
@@ -119,6 +121,7 @@ export const TabEditor: React.FC<TabEditorProps> = ({
   // console.log('[TabEditor] render', fileName);
 
   const posthog = usePostHog();
+  const vimMode = useAtomValue(vimModeAtom);
 
   // Acquire a DocumentModel for this file (shared across all editors of the same file).
   // The model owns the autosave timer, file-watcher coordination, and diff state.
@@ -2542,6 +2545,7 @@ export const TabEditor: React.FC<TabEditorProps> = ({
                       theme,
                       extensionThemeId: themeId,
                       isActive,
+                      vimMode,
                     }}
                     onGetContent={(getContentFn) => {
                       getContentFnRef.current = getContentFn;
@@ -2736,6 +2740,7 @@ export const TabEditor: React.FC<TabEditorProps> = ({
                   theme,
                   extensionThemeId: themeId,
                   isActive,
+                  vimMode,
                 }}
                 onGetContent={(getContentFn) => {
                   getContentFnRef.current = getContentFn;
@@ -2794,6 +2799,7 @@ export const TabEditor: React.FC<TabEditorProps> = ({
                   theme,
                   extensionThemeId: themeId,
                   isActive,
+                  vimMode,
                 }}
                 onGetContent={(getContentFn) => {
                   getContentFnRef.current = getContentFn;

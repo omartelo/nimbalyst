@@ -80,6 +80,8 @@ interface AppStoreSchema {
   unifiedOnboardingCompleted?: boolean; // Unified 3-step onboarding completed (separate from old onboarding)
   // Developer mode - enables git worktrees, terminal, and dev-specific features
   developerMode?: boolean;
+  // Vim mode - when true, MonacoCodeEditor wraps itself with monaco-vim
+  vimMode?: boolean;
   // Custom Editors
   mockupLMEnabled?: boolean; // Enable MockupLM custom editor
   // First launch Claude Code installation detection (only checked once ever)
@@ -1378,6 +1380,15 @@ export function isDeveloperMode(): boolean {
 
 export function setDeveloperMode(enabled: boolean): void {
   getAppStore().set('developerMode', enabled);
+}
+
+// Vim Mode Settings
+export function isVimMode(): boolean {
+  return getAppStore().get('vimMode', false);
+}
+
+export function setVimMode(enabled: boolean): void {
+  getAppStore().set('vimMode', enabled);
 }
 
 // Default AI Model Settings

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Vim mode for the code editor (Monaco), opt-in via `Settings → Application → Advanced → Vim Mode`. Backed by `monaco-vim` and disabled by default; covers normal/insert/visual modes, common motions (`hjkl`, `w/b/e`, `gg/G`, `0/$`, `f/t`), operators (`d`, `y`, `c` + line variants, `p/P`), ex commands (`:w :q :wq :q!`), search (`/`, `?`, `n/N`), undo/redo, and a themed status bar. Markdown editor and diff mode are unaffected.
 <!-- New features go here -->
 
 ### Changed

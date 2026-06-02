@@ -378,6 +378,8 @@ export interface AdvancedSettings {
   historyMaxSnapshots: number; // Max snapshots per file (default: 250)
   // Preferred terminal shell on Windows. 'auto' follows the detection priority.
   preferredTerminalShell: PreferredTerminalShell;
+  // Vim mode in the code editor (Monaco). Wraps the editor with monaco-vim when on.
+  vimMode: boolean;
 }
 
 /**
@@ -402,6 +404,7 @@ const defaultAdvancedSettings: AdvancedSettings = {
   historyMaxAgeDays: 30,
   historyMaxSnapshots: 250,
   preferredTerminalShell: 'auto',
+  vimMode: false,
 };
 
 /**
@@ -488,6 +491,9 @@ function scheduleAdvancedPersist(
           break;
         case 'spellcheckEnabled':
           await window.electronAPI.invoke('spellcheck:set-enabled', settingsToPersist.spellcheckEnabled);
+          break;
+        case 'vimMode':
+          await window.electronAPI.invoke('vim-mode:set', settingsToPersist.vimMode);
           break;
         // walkthroughsViewedCount and walkthroughsTotalCount are read-only from main process
       }
@@ -612,6 +618,13 @@ export const customPathDirsAtom = atom(
   (get) => get(advancedSettingsAtom).customPathDirs
 );
 
+/**
+ * Vim mode enabled (Monaco code editor wrapper).
+ */
+export const vimModeAtom = atom(
+  (get) => get(advancedSettingsAtom).vimMode
+);
+
 // === Setter atoms ===
 
 /**
@@ -656,7 +669,7 @@ export async function initAdvancedSettings(): Promise<AdvancedSettings> {
   }
 
   try {
-    const [channel, analyticsEnabled, extensionDevToolsEnabled, walkthroughState, maxHeapSizeMB, alphaFeatures, betaFeatures, enableAllBetaFeatures, customPathDirs, spellcheckEnabled, historyMaxAgeDays, historyMaxSnapshots, preferredTerminalShell] =
+    const [channel, analyticsEnabled, extensionDevToolsEnabled, walkthroughState, maxHeapSizeMB, alphaFeatures, betaFeatures, enableAllBetaFeatures, customPathDirs, spellcheckEnabled, historyMaxAgeDays, historyMaxSnapshots, preferredTerminalShell, vimMode] =
       await Promise.all([
         window.electronAPI.invoke('release-channel:get'),
         window.electronAPI.invoke('analytics:is-enabled'),
@@ -671,6 +684,7 @@ export async function initAdvancedSettings(): Promise<AdvancedSettings> {
         window.electronAPI.invoke('app-settings:get', 'historyMaxAgeDays'),
         window.electronAPI.invoke('app-settings:get', 'historyMaxSnapshots'),
         window.electronAPI.invoke('app-settings:get', 'preferredTerminalShell'),
+        window.electronAPI.invoke('vim-mode:get'),
       ]);
 
     // Calculate viewed count (completed + dismissed)
@@ -694,6 +708,7 @@ export async function initAdvancedSettings(): Promise<AdvancedSettings> {
       historyMaxAgeDays: historyMaxAgeDays ?? 30,
       historyMaxSnapshots: historyMaxSnapshots ?? 250,
       preferredTerminalShell: preferredTerminalShell ?? 'auto',
+      vimMode: vimMode ?? false,
     };
   } catch (error) {
     console.error('[appSettings] Failed to load advanced settings:', error);

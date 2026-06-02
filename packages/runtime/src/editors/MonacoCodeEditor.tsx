@@ -23,6 +23,31 @@ import './MonacoCodeEditor.css';
 // CSS class for unfocused selection highlight
 const UNFOCUSED_SELECTION_CLASS = 'monaco-unfocused-selection';
 
+// Shape returned by `initVimMode` from monaco-vim. Lib has no formal type for
+// the wrapper instance; we only ever call `dispose()` on it.
+interface VimModeInstance {
+  dispose: () => void;
+}
+
+/**
+ * Safely tear down a monaco-vim instance.
+ *
+ * monaco-vim removes its own DOM listeners and status-bar children on
+ * `dispose()`. If the underlying Monaco editor was already disposed (e.g.
+ * the component unmounted before the async `import('monaco-vim')` resolved
+ * a stale reference), `dispose()` can throw — we log and clear the ref so
+ * a subsequent re-init starts clean.
+ */
+function disposeVimMode(ref: React.MutableRefObject<VimModeInstance | null>): void {
+  if (!ref.current) return;
+  try {
+    ref.current.dispose();
+  } catch (err) {
+    console.warn('[MonacoCodeEditor] monaco-vim dispose failed:', err);
+  }
+  ref.current = null;
+}
+
 export interface MonacoCodeEditorProps {
   // File info
   filePath: string;
@@ -42,6 +67,10 @@ export interface MonacoCodeEditorProps {
 
   // Optional Monaco construction overrides for normal edit mode
   editorOptions?: MonacoEditorType.IStandaloneEditorConstructionOptions;
+
+  // When true, attach monaco-vim to the editor (normal/insert/visual modes,
+  // motions, operators, ex commands, search, status bar). No-op for diff mode.
+  vimModeEnabled?: boolean;
 
   // Callbacks
   /**
@@ -71,6 +100,7 @@ export const MonacoCodeEditor: React.FC<MonacoCodeEditorProps> = ({
   extensionThemeId,
   isActive = true,
   editorOptions,
+  vimModeEnabled = false,
   onDirtyChange,
   onGetContent,
   onEditorReady,
@@ -98,6 +128,13 @@ export const MonacoCodeEditor: React.FC<MonacoCodeEditorProps> = ({
   // Track selection decorations for unfocused state
   const selectionDecorationsRef = useRef<string[]>([]);
   const lastSelectionRef = useRef<Selection | null>(null);
+
+  // monaco-vim wrapper instance + status bar mount node
+  const vimModeRef = useRef<VimModeInstance | null>(null);
+  const vimStatusBarRef = useRef<HTMLDivElement | null>(null);
+  // Bumped by handleEditorMount so the vim-mode effect re-runs after each
+  // Monaco mount (e.g. after exiting diff mode the Editor remounts).
+  const [editorMountToken, setEditorMountToken] = useState(0);
 
   // Clear selection and decorations when tab becomes inactive
   useEffect(() => {
@@ -297,6 +334,7 @@ export const MonacoCodeEditor: React.FC<MonacoCodeEditorProps> = ({
    */
   const handleEditorMount: OnMount = useCallback((editor, monaco) => {
     editorRef.current = editor;
+    setEditorMountToken((t) => t + 1);
 
     // Disable TypeScript/JavaScript diagnostics globally
     try {
@@ -469,6 +507,41 @@ export const MonacoCodeEditor: React.FC<MonacoCodeEditorProps> = ({
     };
   }, []);
 
+  /**
+   * Manage monaco-vim attachment.
+   *
+   * Activates only for the standard Editor (diff mode is excluded — monaco-vim
+   * does not support IStandaloneDiffEditor). Re-runs on toggle, diff transition,
+   * and editor remount; tears down any prior instance synchronously.
+   */
+  useEffect(() => {
+    disposeVimMode(vimModeRef);
+
+    if (!vimModeEnabled || diffMode) return;
+    if (editorMountToken === 0) return;
+    if (!editorRef.current || !vimStatusBarRef.current) return;
+
+    let cancelled = false;
+    import('monaco-vim')
+      .then(({ initVimMode }) => {
+        if (cancelled) return;
+        if (!editorRef.current || !vimStatusBarRef.current) return;
+        try {
+          vimModeRef.current = initVimMode(editorRef.current, vimStatusBarRef.current);
+        } catch (err) {
+          console.warn('[MonacoCodeEditor] monaco-vim init failed:', err);
+        }
+      })
+      .catch((err) => {
+        console.warn('[MonacoCodeEditor] monaco-vim load failed:', err);
+      });
+
+    return () => {
+      cancelled = true;
+      disposeVimMode(vimModeRef);
+    };
+  }, [vimModeEnabled, diffMode, editorMountToken]);
+
   // Render diff editor when in diff mode, normal editor otherwise
   return (
     <div className="monaco-code-editor" data-file-path={filePath} data-diff-mode={!!diffMode}>
@@ -532,6 +605,13 @@ export const MonacoCodeEditor: React.FC<MonacoCodeEditorProps> = ({
             unusualLineTerminators: 'auto',
             ...editorOptions,
           }}
+        />
+      )}
+      {vimModeEnabled && !diffMode && (
+        <div
+          ref={vimStatusBarRef}
+          className="monaco-vim-status-bar"
+          data-testid="monaco-vim-status-bar"
         />
       )}
     </div>

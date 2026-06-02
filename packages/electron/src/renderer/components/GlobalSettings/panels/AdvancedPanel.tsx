@@ -144,6 +144,7 @@ export function AdvancedPanel() {
     historyMaxAgeDays,
     historyMaxSnapshots,
     preferredTerminalShell,
+    vimMode,
   } = settings;
   const [showFeaturesMenu, setShowFeaturesMenu] = useState(false);
 
@@ -446,6 +447,16 @@ export function AdvancedPanel() {
           onChange={(checked) => updateSettings({ spellcheckEnabled: checked })}
           name="Spellcheck"
           description="Enable the system spellchecker in editors and text inputs."
+        />
+
+        <SettingsToggle
+          checked={vimMode}
+          onChange={(checked) => {
+            updateSettings({ vimMode: checked });
+            posthog?.capture('vim_mode_changed', { vim_mode: checked });
+          }}
+          name="Vim Mode"
+          description="Wrap the code editor (Monaco) with monaco-vim. Adds normal/insert/visual modes, motions, operators, ex commands, search, and an inline status bar. Code files only; markdown editor is unaffected."
         />
 
         <SettingsToggle
