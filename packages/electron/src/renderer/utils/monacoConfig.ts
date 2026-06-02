@@ -11,6 +11,7 @@ import {
   getThemesWithMonacoDefinition,
   onThemesChanged,
   MONACO_BASE_THEMES,
+  toMonacoExtensionThemeName,
   type MonacoThemeContribution,
 } from '@nimbalyst/runtime';
 
@@ -141,30 +142,39 @@ function defineCustomMonacoThemes(): void {
 }
 
 /**
- * Define a single Monaco theme from an extension contribution.
- * Idempotent -- redefining the same id is allowed (Monaco overwrites).
+ * Define a single Monaco theme from an extension contribution. The
+ * caller is responsible for passing a Monaco-legal theme name (see
+ * `toMonacoExtensionThemeName`); Monaco's `defineTheme` throws on names
+ * that don't match `/^[a-z0-9\-]+$/`. Idempotent -- redefining the same
+ * id is allowed (Monaco overwrites).
  */
-function defineExtensionMonacoTheme(themeId: string, def: MonacoThemeContribution): void {
-  monaco.editor.defineTheme(themeId, {
+function defineExtensionMonacoTheme(monacoThemeName: string, def: MonacoThemeContribution): void {
+  monaco.editor.defineTheme(monacoThemeName, {
     base: def.base,
     inherit: def.inherit ?? true,
     rules: def.rules,
     colors: def.colors,
   });
-  registeredThemes.add(themeId);
+  registeredThemes.add(monacoThemeName);
 }
 
 /**
  * Walk the runtime theme registry and register a Monaco theme for every
  * entry that carries a `monaco` block. Safe to call repeatedly; each
  * call replaces previously-registered definitions.
+ *
+ * The extension theme id (e.g. `com.acme.themes:dracula`) is sanitized
+ * via `toMonacoExtensionThemeName` because Monaco rejects theme names
+ * with `.` or `:`. `getMonacoTheme` runs the same transform on the
+ * lookup side so `setTheme` finds the registered entry.
  */
 function syncMonacoThemesFromRegistry(): void {
   for (const theme of getThemesWithMonacoDefinition()) {
+    const monacoName = toMonacoExtensionThemeName(theme.id);
     try {
-      defineExtensionMonacoTheme(theme.id, theme.monaco!);
+      defineExtensionMonacoTheme(monacoName, theme.monaco!);
     } catch (error) {
-      console.error(`[Monaco] Failed to register extension theme '${theme.id}':`, error);
+      console.error(`[Monaco] Failed to register extension theme '${theme.id}' (as '${monacoName}'):`, error);
     }
   }
 }

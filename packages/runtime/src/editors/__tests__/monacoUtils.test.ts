@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getMonacoTheme } from '../monacoUtils';
+import { getMonacoTheme, toMonacoExtensionThemeName } from '../monacoUtils';
 import { registerThemeContribution } from '../../editor/themes/registry';
 
 describe('getMonacoTheme', () => {
@@ -20,7 +20,7 @@ describe('getMonacoTheme', () => {
     expect(getMonacoTheme('crystal-dark')).toBe('vs-dark');
   });
 
-  it('returns the namespaced extension theme id when the registry has a monaco block', () => {
+  it('returns the sanitized Monaco theme name when the registry has a monaco block', () => {
     const unregister = registerThemeContribution('test.ext.mono', {
       id: 'dracula',
       name: 'Dracula',
@@ -33,7 +33,11 @@ describe('getMonacoTheme', () => {
       },
     });
     try {
-      expect(getMonacoTheme('dark', true, 'test.ext.mono:dracula')).toBe('test.ext.mono:dracula');
+      // Monaco rejects names with `.` or `:`, so we sanitize the
+      // namespaced extension id when handing it to Monaco.
+      const expected = toMonacoExtensionThemeName('test.ext.mono:dracula');
+      expect(getMonacoTheme('dark', true, 'test.ext.mono:dracula')).toBe(expected);
+      expect(expected).toMatch(/^[a-z0-9-]+$/);
     } finally {
       unregister();
     }
@@ -66,12 +70,21 @@ describe('getMonacoTheme', () => {
         colors: { 'editor.background': '#000000' },
       },
     });
-    expect(getMonacoTheme('dark', true, 'test.ext.gone:fleeting')).toBe('test.ext.gone:fleeting');
+    expect(getMonacoTheme('dark', true, 'test.ext.gone:fleeting')).toBe(
+      toMonacoExtensionThemeName('test.ext.gone:fleeting')
+    );
 
     unregister();
 
     // After unregistration, the extension id no longer resolves to a
     // registered theme and we fall back to the base Monaco theme.
     expect(getMonacoTheme('dark', true, 'test.ext.gone:fleeting')).toBe('vs-dark');
+  });
+
+  it('strips the namespace prefix when computing the Monaco theme name', () => {
+    expect(toMonacoExtensionThemeName('com.acme.themes:rose-pine')).toBe('rose-pine');
+    expect(toMonacoExtensionThemeName('com.rosepinetheme.nimbalyst:rose-pine-moon')).toBe('rose-pine-moon');
+    // No namespace -> returned verbatim.
+    expect(toMonacoExtensionThemeName('monokai')).toBe('monokai');
   });
 });

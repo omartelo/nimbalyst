@@ -8,6 +8,31 @@ import type { ConfigTheme } from '../editor';
 import { getTheme } from '../editor/themes/registry';
 
 /**
+ * Pick the Monaco theme name to use for an extension-contributed theme.
+ *
+ * Monaco's `editor.defineTheme()` enforces `/^[a-z0-9\-]+$/` on theme
+ * names and silently falls back to `vs` (light) in `setTheme()` when an
+ * unknown name is passed. Our namespaced extension ids -- e.g.
+ * `com.rosepinetheme.nimbalyst:rose-pine` -- contain `.` and `:`, which
+ * violate the regex.
+ *
+ * The manifest validator already pins `contribution.id` (the part after
+ * the namespace) to `/^[a-z0-9][a-z0-9-]*$/`, which is a strict subset
+ * of Monaco's accepted shape. So taking the part after the final `:` is
+ * always a Monaco-legal name and matches the id the extension author
+ * actually wrote in the manifest, which keeps log messages and devtools
+ * inspection readable. The trade-off: two extensions that declare the
+ * same theme id (e.g. both ship `id: "monokai"`) collide and the second
+ * registration overwrites the first inside Monaco. Monaco itself allows
+ * the redefinition without error, and the UI shell still distinguishes
+ * the themes via the namespaced id, so this is acceptable in practice.
+ */
+export function toMonacoExtensionThemeName(extensionThemeId: string): string {
+  const colonIndex = extensionThemeId.lastIndexOf(':');
+  return colonIndex >= 0 ? extensionThemeId.substring(colonIndex + 1) : extensionThemeId;
+}
+
+/**
  * Static map of theme IDs to their Monaco theme names.
  * Covers the built-in solarized/monokai themes registered in
  * monacoConfig.ts as well as the legacy namespaced IDs they used to ship
@@ -50,10 +75,12 @@ export function getMonacoTheme(nimbalystTheme: ConfigTheme, isDark?: boolean, ex
     }
 
     // Extension-contributed Monaco theme: the bridge registers the
-    // theme under its namespaced id, so we can return it verbatim.
+    // theme under a sanitized name (see toMonacoExtensionThemeName for
+    // why) and we have to hand that exact same name to Monaco's
+    // setTheme, otherwise Monaco silently falls back to `vs`.
     const registered = getTheme(extensionThemeId);
     if (registered?.monaco) {
-      return extensionThemeId;
+      return toMonacoExtensionThemeName(extensionThemeId);
     }
   }
 
