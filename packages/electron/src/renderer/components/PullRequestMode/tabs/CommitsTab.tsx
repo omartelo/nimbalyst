@@ -91,6 +91,12 @@ export function CommitsTab({ workspaceId, remote, pr, refreshToken }: CommitsTab
               <div className="text-[11px] text-nim-faint flex items-center gap-2 mt-0.5">
                 {commit.authorLogin && <span>{commit.authorLogin}</span>}
                 <span>{formatRelative(commit.authoredAt)}</span>
+                {(commit.additions > 0 || commit.deletions > 0) && (
+                  <span className="font-mono">
+                    <span className="text-nim-success">+{commit.additions}</span>{' '}
+                    <span className="text-nim-error">-{commit.deletions}</span>
+                  </span>
+                )}
               </div>
             </div>
             <button

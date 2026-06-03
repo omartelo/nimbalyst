@@ -71,6 +71,8 @@ export interface PullRequestCommitRow {
   message: string;
   authorLogin: string | null;
   authoredAt: number;
+  additions: number;
+  deletions: number;
 }
 
 export interface PullRequestCheckRow {
@@ -144,6 +146,8 @@ interface PullRequestCommitDbRow {
   message: string;
   author_login: string | null;
   authored_at: Date | string | number;
+  additions: number;
+  deletions: number;
 }
 
 interface PullRequestCheckDbRow {
@@ -235,6 +239,8 @@ function rowToCommit(row: PullRequestCommitDbRow): PullRequestCommitRow {
     message: row.message,
     authorLogin: row.author_login,
     authoredAt: toMillis(row.authored_at) ?? 0,
+    additions: row.additions ?? 0,
+    deletions: row.deletions ?? 0,
   };
 }
 
@@ -459,8 +465,8 @@ export function createPullRequestsStore(db: PGliteLike, ensureDbReady?: EnsureRe
         seen.add(commit.sha);
         await db.query(
           `INSERT INTO pull_request_commits (
-            pr_id, sha, message, author_login, authored_at
-          ) VALUES ($1, $2, $3, $4, $5)
+            pr_id, sha, message, author_login, authored_at, additions, deletions
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7)
           ON CONFLICT (pr_id, sha) DO NOTHING`,
           [
             commit.prId,
@@ -468,6 +474,8 @@ export function createPullRequestsStore(db: PGliteLike, ensureDbReady?: EnsureRe
             commit.message,
             commit.authorLogin,
             new Date(commit.authoredAt),
+            commit.additions,
+            commit.deletions,
           ],
         );
       }

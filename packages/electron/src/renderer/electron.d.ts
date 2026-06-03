@@ -89,6 +89,8 @@ interface PullRequestCommitRow {
   message: string;
   authorLogin: string | null;
   authoredAt: number;
+  additions: number;
+  deletions: number;
 }
 
 interface PullRequestCheckRow {

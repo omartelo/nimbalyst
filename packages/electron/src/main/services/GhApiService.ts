@@ -260,6 +260,8 @@ interface GhCommitPayload {
     author?: { name?: string; date?: string };
   };
   author?: { login?: string } | null;
+  // Present only on the single-commit endpoint, not the PR commits list.
+  stats?: { additions?: number; deletions?: number };
 }
 
 interface GhCheckRunsPayload {
@@ -390,11 +392,38 @@ function mapCommitToRow(prId: string, payload: GhCommitPayload): PullRequestComm
     authoredAt: payload.commit.author?.date
       ? new Date(payload.commit.author.date).getTime()
       : Date.now(),
+    additions: payload.stats?.additions ?? 0,
+    deletions: payload.stats?.deletions ?? 0,
   };
 }
 
 function makePrId(remote: Remote, number: number): string {
   return `pr_${remote.replace('/', '_')}_${number}`;
+}
+
+// Cap per-commit stat fetches so a giant PR doesn't spawn hundreds of `gh`
+// processes. Commits beyond the cap show 0/0.
+const COMMIT_STATS_CAP = 100;
+const COMMIT_STATS_CONCURRENCY = 5;
+
+/** Run async `task` over `items` with bounded concurrency, preserving order. */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  task: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await task(items[i], i);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
 }
 
 // Per-login token cache. Tokens come from gh's keyring via `gh auth token
@@ -593,6 +622,27 @@ export class GhApiService {
     const payloads = parsePagedJson<GhCommitPayload>(stdout);
     const prId = makePrId(remote, number);
     const commits = payloads.map((p) => mapCommitToRow(prId, p));
+
+    // The PR commits list omits stats; backfill additions/deletions from the
+    // single-commit endpoint (bounded concurrency, capped). Best-effort —
+    // a failed stat fetch leaves that commit at 0/0.
+    const toEnrich = commits.slice(0, COMMIT_STATS_CAP);
+    await mapWithConcurrency(toEnrich, COMMIT_STATS_CONCURRENCY, async (commit) => {
+      try {
+        const detail = await this.ghApi(
+          buildApiArgs(`repos/${remote}/commits/${commit.sha}`, {
+            cacheSeconds: DEFAULT_CACHE_DETAIL_SECONDS,
+          }),
+          workspaceId,
+        );
+        const payload = JSON.parse(detail.trim()) as GhCommitPayload;
+        commit.additions = payload.stats?.additions ?? 0;
+        commit.deletions = payload.stats?.deletions ?? 0;
+      } catch (error) {
+        logger.warn('commit stats fetch failed', { sha: commit.sha, error });
+      }
+    });
+
     await this.store.replaceCommits(prId, commits);
     return commits;
   }
