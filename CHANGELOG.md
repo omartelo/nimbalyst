@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- PR review now shows an actionable message on a GitHub 404 (repo not found or the active `gh` account lacks access — check `gh auth status` / `gh auth switch`) instead of a raw error, and no longer prints a duplicated `api` in the failure text. (#307)
 - Fixed an EPIPE feedback loop where the main-process uncaught-exception handler re-entered itself when stderr was broken on Linux, flooding the log until the process died.
 - Meta-agent child sessions now inherit the parent session's provider and model instead of silently falling back to a Claude/Opus default for non-Claude parents.
 

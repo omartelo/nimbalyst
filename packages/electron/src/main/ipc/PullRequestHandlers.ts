@@ -60,9 +60,21 @@ function errorResponse(error: unknown): IPCResponse<never> {
 
 function ghErrorResponse(error: unknown): IPCResponse<never> {
   if (error instanceof GhApiError) {
+    const stderr = error.stderr.trim();
+    // A 404 on a repo endpoint almost always means the *active* gh account
+    // can't see the repo (private repo + wrong account, e.g. an EMU), not
+    // that the repo is missing. Point the user at the likely fix.
+    if (/Not Found|HTTP 404/i.test(stderr)) {
+      return {
+        success: false,
+        error:
+          'Repository not found, or the active GitHub CLI account cannot access it. ' +
+          'Check `gh auth status` and switch accounts with `gh auth switch` if needed.',
+      };
+    }
     return {
       success: false,
-      error: `${error.message}: ${error.stderr.trim() || `exit ${error.exitCode}`}`,
+      error: `${error.message}: ${stderr || `exit ${error.exitCode}`}`,
     };
   }
   return errorResponse(error);
