@@ -2,17 +2,26 @@
  * PullRequestMode — top-level container for the GitHub PR review panel
  * (issue #307).
  *
- * Phase E: plumbing only. This renders the onboarding banner and a
- * placeholder, manages the poll lifecycle (start/stop + foreground focus),
- * and dispatches `pr:focus` so the main-process scheduler switches cadence.
- * The list + detail views land in Phases F and G.
+ * Manages the poll lifecycle (start/stop + foreground focus + immediate poll
+ * on enter), dispatches `pr:focus` so the main-process scheduler switches
+ * cadence, and renders the sidebar + list (Phase F). The detail panel lands
+ * in Phase G.
  */
 
-import { useEffect } from 'react';
-import { useAtomValue } from 'jotai';
-import { prRemoteAtom } from '../../store/atoms/pullRequests';
+import { useCallback, useEffect } from 'react';
+import { useAtomValue, useSetAtom } from 'jotai';
+import { ResizablePanel } from '../AgenticCoding/ResizablePanel';
+import {
+  prRemoteAtom,
+  prModeLayoutAtom,
+  setPrModeLayoutAtom,
+  initPrModeLayout,
+  type PrFilterChip,
+} from '../../store/atoms/pullRequests';
 import { getPullRequestService } from '../../services/RendererPullRequestService';
 import { GhOnboardingBanner } from './GhOnboardingBanner';
+import { PullRequestSidebar } from './PullRequestSidebar';
+import { PullRequestListView } from './PullRequestListView';
 
 interface PullRequestModeProps {
   workspacePath: string;
@@ -27,11 +36,18 @@ export function PullRequestMode({
   isActive,
 }: PullRequestModeProps): JSX.Element {
   const remote = useAtomValue(prRemoteAtom);
+  const layout = useAtomValue(prModeLayoutAtom);
+  const setLayout = useSetAtom(setPrModeLayoutAtom);
+
   const remoteForWorkspace =
     remote && remote.workspacePath === workspacePath ? remote.remote : null;
 
-  // Start/stop the background poller for this workspace's remote. The poll
-  // scheduler is idempotent on start and tears the timer down on stop.
+  // Load persisted layout when the workspace becomes known / changes.
+  useEffect(() => {
+    void initPrModeLayout(workspacePath);
+  }, [workspacePath]);
+
+  // Start/stop the background poller for this workspace's remote.
   useEffect(() => {
     if (!remoteForWorkspace) return;
     const service = getPullRequestService();
@@ -41,8 +57,7 @@ export function PullRequestMode({
     };
   }, [workspacePath, remoteForWorkspace]);
 
-  // Drive the scheduler's foreground set + trigger an immediate poll on enter
-  // so the user doesn't wait a full interval for the first list.
+  // Drive the scheduler's foreground set + trigger an immediate poll on enter.
   useEffect(() => {
     if (!remoteForWorkspace) return;
     const service = getPullRequestService();
@@ -55,14 +70,65 @@ export function PullRequestMode({
     };
   }, [workspacePath, isActive, remoteForWorkspace]);
 
-  return (
-    <div className="pr-review-mode flex flex-col h-full w-full overflow-hidden">
-      <GhOnboardingBanner />
-      <div className="pr-review-placeholder flex flex-1 items-center justify-center text-nim-muted text-sm">
-        {remoteForWorkspace
-          ? `Pull requests for ${remoteForWorkspace} — list view coming next.`
-          : `No GitHub remote detected for ${workspaceName}.`}
+  // `open` / `closed` are mutually exclusive; the rest toggle independently.
+  const handleToggleFilter = useCallback(
+    (filter: PrFilterChip) => {
+      let current = layout.activeFilters;
+      if (filter === 'open') current = current.filter((f) => f !== 'closed');
+      if (filter === 'closed') current = current.filter((f) => f !== 'open');
+      const next = current.includes(filter)
+        ? current.filter((f) => f !== filter)
+        : [...current, filter];
+      setLayout({ activeFilters: next });
+    },
+    [layout.activeFilters, setLayout],
+  );
+
+  const handleSidebarWidthChange = useCallback(
+    (width: number) => setLayout({ sidebarWidth: width }),
+    [setLayout],
+  );
+
+  if (!remoteForWorkspace) {
+    return (
+      <div className="pr-review-mode flex flex-col h-full w-full overflow-hidden">
+        <GhOnboardingBanner />
+        <div className="pr-review-placeholder flex flex-1 items-center justify-center text-nim-muted text-sm">
+          No GitHub remote detected for {workspaceName}.
+        </div>
       </div>
+    );
+  }
+
+  const sidebarContent = (
+    <PullRequestSidebar
+      remote={remoteForWorkspace}
+      activeFilters={layout.activeFilters}
+      onToggleFilter={handleToggleFilter}
+    />
+  );
+
+  const mainContent = (
+    <div className="flex flex-col h-full w-full overflow-hidden">
+      <GhOnboardingBanner />
+      <PullRequestListView
+        workspaceId={workspacePath}
+        remote={remoteForWorkspace}
+        isActive={isActive}
+      />
+    </div>
+  );
+
+  return (
+    <div className="pr-review-mode flex-1 flex flex-row overflow-hidden min-h-0">
+      <ResizablePanel
+        leftPanel={sidebarContent}
+        rightPanel={mainContent}
+        leftWidth={layout.sidebarWidth}
+        minWidth={160}
+        maxWidth={350}
+        onWidthChange={handleSidebarWidthChange}
+      />
     </div>
   );
 }
