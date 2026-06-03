@@ -827,7 +827,7 @@ const EditorMode = forwardRef<EditorModeRef, EditorModeProps>(function EditorMod
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizingRef.current) return;
 
-      const newWidth = Math.min(Math.max(150, e.clientX), 500);
+      const newWidth = Math.min(Math.max(200, e.clientX), 500);
       setSidebarWidth(newWidth);
     };
 
