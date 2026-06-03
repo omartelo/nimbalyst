@@ -1209,6 +1209,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('pr:poll-now', workspacePath),
   prFocus: (workspacePath: string, focused: boolean) =>
     ipcRenderer.send('pr:focus', { workspacePath, focused }),
+  prOpenWorktree: (workspacePath: string, remote: string, number: number) =>
+    ipcRenderer.invoke('pr:open-worktree', workspacePath, remote, number),
   onPrListUpdated: (callback: (payload: { workspacePath: string; remote: string }) => void) => {
     const handler = (
       _event: Electron.IpcRendererEvent,

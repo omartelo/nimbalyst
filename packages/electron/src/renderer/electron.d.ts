@@ -1283,6 +1283,23 @@ interface ElectronAPI {
   onPrListUpdated: (
     callback: (payload: { workspacePath: string; remote: string }) => void,
   ) => () => void;
+  prOpenWorktree: (
+    workspacePath: string,
+    remote: string,
+    number: number,
+  ) => Promise<{
+    success: boolean;
+    error?: string;
+    data?: {
+      id: string;
+      name: string;
+      path: string;
+      branch: string;
+      prNumber?: number;
+      prRemote?: string;
+      prUrl?: string;
+    };
+  }>;
 
   // Archive progress operations
   archive: {

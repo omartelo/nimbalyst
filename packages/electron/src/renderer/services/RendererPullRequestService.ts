@@ -145,6 +145,18 @@ export class RendererPullRequestService {
   ): () => void {
     return requireApi().onPrListUpdated(callback);
   }
+
+  /**
+   * Create (or reuse) a worktree bound to a PR and return it. Phase H.
+   */
+  async openWorktree(
+    workspaceId: string,
+    remote: string,
+    number: number,
+  ): Promise<{ id: string; name: string; path: string; branch: string }> {
+    const res = await requireApi().prOpenWorktree(workspaceId, remote, number);
+    return unwrap(res, 'pr:open-worktree');
+  }
 }
 
 let instance: RendererPullRequestService | null = null;

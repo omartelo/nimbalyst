@@ -20,6 +20,8 @@ import {
   type PrFilterChip,
 } from '../../store/atoms/pullRequests';
 import { getPullRequestService } from '../../services/RendererPullRequestService';
+import { setSelectedWorkstreamAtom } from '../../store/atoms/sessions';
+import { setWindowModeAtom } from '../../store/atoms/windowMode';
 import { GhOnboardingBanner } from './GhOnboardingBanner';
 import { PullRequestSidebar } from './PullRequestSidebar';
 import { PullRequestListView } from './PullRequestListView';
@@ -41,6 +43,8 @@ export function PullRequestMode({
   const layout = useAtomValue(prModeLayoutAtom);
   const setLayout = useSetAtom(setPrModeLayoutAtom);
   const prList = useAtomValue(prListAtom);
+  const setSelectedWorkstream = useSetAtom(setSelectedWorkstreamAtom);
+  const setWindowMode = useSetAtom(setWindowModeAtom);
 
   const remoteForWorkspace =
     remote && remote.workspacePath === workspacePath ? remote.remote : null;
@@ -116,6 +120,26 @@ export function PullRequestMode({
       ? prList.find((pr) => pr.id === layout.selectedItemId) ?? null
       : null;
 
+  // Create (or reuse) a worktree on the PR branch, then jump to Agent mode
+  // with that worktree selected so the user can start a Claude Code session.
+  const handleOpenInClaudeCode = useCallback(async () => {
+    if (!selectedPr || !remoteForWorkspace) return;
+    try {
+      const worktree = await getPullRequestService().openWorktree(
+        workspacePath,
+        remoteForWorkspace,
+        selectedPr.number,
+      );
+      setSelectedWorkstream({
+        workspacePath,
+        selection: { type: 'worktree', id: worktree.id },
+      });
+      setWindowMode('agent');
+    } catch (err) {
+      console.error('[PullRequestMode] Failed to open PR worktree', err);
+    }
+  }, [selectedPr, remoteForWorkspace, workspacePath, setSelectedWorkstream, setWindowMode]);
+
   const mainContent = (
     <div className="flex flex-row h-full w-full overflow-hidden">
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
@@ -136,6 +160,7 @@ export function PullRequestMode({
             remote={remoteForWorkspace}
             pr={selectedPr}
             onClose={() => setLayout({ selectedItemId: null })}
+            onOpenInClaudeCode={handleOpenInClaudeCode}
           />
         </div>
       )}

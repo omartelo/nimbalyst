@@ -15,6 +15,9 @@
  * of these channels in later commits.
  */
 
+import { BrowserWindow } from 'electron';
+import fs from 'node:fs';
+import simpleGit from 'simple-git';
 import log from 'electron-log/main';
 import { safeHandle, safeOn } from '../utils/ipcRegistry';
 import { ghCliDetector, type GhCliStatus } from '../services/GhCliDetector';
@@ -26,6 +29,10 @@ import {
 } from '../services/GhApiService';
 import { createPullRequestsStore, type PullRequestsStore } from '../services/PullRequestsStore';
 import { GitStatusService } from '../services/GitStatusService';
+import { GitWorktreeService } from '../services/GitWorktreeService';
+import { createWorktreeStore, type Worktree } from '../services/WorktreeStore';
+import { gitOperationLock } from '../services/GitOperationLock';
+import { gitRefWatcher } from '../file/GitRefWatcher';
 import { getDatabase } from '../database/initialize';
 import {
   initPullRequestPollScheduler,
@@ -65,6 +72,23 @@ let cachedStore: PullRequestsStore | null = null;
 let cachedService: GhApiService | null = null;
 let cachedScheduler: PullRequestPollScheduler | null = null;
 const gitStatusService = new GitStatusService();
+const gitWorktreeService = new GitWorktreeService();
+
+/** Broadcast that a workspace's worktree list changed (e.g. a PR worktree was created). */
+function emitWorktreeListChanged(workspacePath: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('git:status-changed', { workspacePath });
+    }
+  }
+}
+
+/** Resolve the PR's web URL from cache, falling back to a constructed github.com URL. */
+function resolvePrUrl(cached: PullRequestRow | null, remote: string, number: number): string {
+  const raw = cached?.raw as { html_url?: unknown } | undefined;
+  if (raw && typeof raw.html_url === 'string') return raw.html_url;
+  return `https://github.com/${remote}/pull/${number}`;
+}
 
 function getStore(): PullRequestsStore {
   if (cachedStore) return cachedStore;
@@ -305,6 +329,84 @@ export function registerPullRequestHandlers(): void {
       } catch (error: unknown) {
         logger.error('pr:refresh failed', { remote, number, error });
         return ghErrorResponse(error);
+      }
+    },
+  );
+
+  // ----- Worktree from PR (Phase H) --------------------------------------
+
+  safeHandle(
+    'pr:open-worktree',
+    async (
+      _event,
+      workspacePath: string,
+      remote: string,
+      number: number,
+    ): Promise<IPCResponse<Worktree>> => {
+      if (!workspacePath || !remote || !number) {
+        return { success: false, error: 'workspacePath, remote, number required' };
+      }
+      try {
+        const db = getDatabase();
+        if (!db) {
+          throw new Error('Database not initialized');
+        }
+        const worktreeStore = createWorktreeStore(db);
+
+        // Idempotent: reuse an existing worktree bound to this PR if its dir
+        // still exists on disk.
+        const existing = await worktreeStore.findByPullRequest(workspacePath, remote, number);
+        if (existing && fs.existsSync(existing.path)) {
+          logger.info('Reusing existing PR worktree', { id: existing.id, number });
+          return { success: true, data: existing };
+        }
+
+        // Fetch the PR head into a unique local branch. Done in its own lock,
+        // released before createWorktree acquires its own (avoids re-entrancy).
+        const branchName = await gitOperationLock.withLock(
+          workspacePath,
+          'pr-fetch',
+          async () => {
+            const git = simpleGit(workspacePath);
+            const local = await git.branchLocal();
+            let candidate = `pr-${number}`;
+            let suffix = 2;
+            while (local.all.includes(candidate)) {
+              candidate = `pr-${number}-${suffix}`;
+              suffix += 1;
+            }
+            await git.fetch('origin', `pull/${number}/head:${candidate}`);
+            return candidate;
+          },
+        );
+
+        // Create the worktree on a branch based off the fetched PR head, then
+        // persist + start the ref watcher (mirrors worktree:create).
+        const worktree = await gitWorktreeService.createWorktree(workspacePath, {
+          name: `pr-${number}`,
+          baseBranch: branchName,
+        });
+        await worktreeStore.create(worktree);
+        gitRefWatcher.start(worktree.path).catch((err) => {
+          logger.error('Failed to start GitRefWatcher for PR worktree:', err);
+        });
+
+        // Link the worktree to the PR for idempotency + future badge display.
+        const cached = await getStore().getByNumber(workspacePath, remote, number);
+        const prUrl = resolvePrUrl(cached, remote, number);
+        await worktreeStore.linkPullRequest(worktree.id, {
+          prNumber: number,
+          prRemote: remote,
+          prUrl,
+        });
+
+        emitWorktreeListChanged(workspacePath);
+
+        const linked = await worktreeStore.get(worktree.id);
+        return { success: true, data: linked ?? worktree };
+      } catch (error: unknown) {
+        logger.error('pr:open-worktree failed', { remote, number, error });
+        return errorResponse(error);
       }
     },
   );
