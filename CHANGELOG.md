@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PR review cache schema (`pull_requests`, `pull_request_files`, `pull_request_commits`, `pull_request_checks`) and `worktrees.pr_*` linkage columns, plus a typed `PullRequestsStore` and `WorktreeStore.linkPullRequest` / `findByPullRequest` helpers. (#307)
 - `GhApiService` and IPC channels (`pr:list`, `pr:get`, `pr:files`, `pr:file-contents`, `pr:commits`, `pr:checks`, `pr:conversation`, `pr:refresh`, `pr:detect-remote`) that fetch GitHub data via `gh api` and persist normalized rows to the cache. (#307)
 - `PullRequestPollScheduler` that polls open PRs every 60s when the PR review panel is in the foreground and every 5min otherwise, broadcasting `pr:list-updated` after each successful tick so the renderer re-reads the cache. (#307)
+- A `pr-review` workspace mode with a navigation-gutter button that appears only when the active project has a GitHub remote, wired to PR atoms and listeners (gh status, remote detection, list-updated). (#307)
 <!-- New features go here -->
 
 ### Changed
