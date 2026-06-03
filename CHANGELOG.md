@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude Code variants `opus-4-7` and `opus-4-7-1m` pinned to Opus 4.7 so it stays selectable after the canonical `opus` alias was bumped to 4.8. (#473)
 - Extension themes can contribute Monaco editor themes via an optional `monaco` block in `contributions.themes[]`, defining `base`, `rules`, and `colors`. Monaco-backed editors register the theme dynamically and switch to it when the user activates the theme; omitting the block keeps the previous `vs` / `vs-dark` fallback.
 - Internal scaffolding for the upcoming PR review panel: detects whether the `gh` CLI is installed and authenticated, with an onboarding banner that guides install/login without ever storing a GitHub token. (#307)
+- PR review cache schema (`pull_requests`, `pull_request_files`, `pull_request_commits`, `pull_request_checks`) and `worktrees.pr_*` linkage columns, plus a typed `PullRequestsStore` and `WorktreeStore.linkPullRequest` / `findByPullRequest` helpers. (#307)
 <!-- New features go here -->
 
 ### Changed
