@@ -1200,6 +1200,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
   prRefresh: (workspaceId: string, remote: string, number?: number) =>
     ipcRenderer.invoke('pr:refresh', workspaceId, remote, number),
 
+  // PR review panel — polling scheduler (Phase D of issue #307)
+  prStartPolling: (workspacePath: string, workspaceId: string, remote: string) =>
+    ipcRenderer.invoke('pr:start-polling', workspacePath, workspaceId, remote),
+  prStopPolling: (workspacePath: string) =>
+    ipcRenderer.invoke('pr:stop-polling', workspacePath),
+  prPollNow: (workspacePath: string) =>
+    ipcRenderer.invoke('pr:poll-now', workspacePath),
+  prFocus: (workspacePath: string, focused: boolean) =>
+    ipcRenderer.send('pr:focus', { workspacePath, focused }),
+  onPrListUpdated: (callback: (payload: { workspacePath: string; remote: string }) => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: { workspacePath: string; remote: string },
+    ) => callback(payload);
+    ipcRenderer.on('pr:list-updated', handler);
+    return () => ipcRenderer.removeListener('pr:list-updated', handler);
+  },
+
   // Archive progress operations
   archive: {
     getTasks: () => ipcRenderer.invoke('archive:get-tasks'),

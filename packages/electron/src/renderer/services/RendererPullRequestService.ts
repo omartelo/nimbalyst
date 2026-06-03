@@ -114,6 +114,37 @@ export class RendererPullRequestService {
     const data = unwrap(res, 'pr:refresh');
     return data.fetchedAt;
   }
+
+  // ----- Polling scheduler (Phase D of issue #307) -----------------------
+
+  async startPolling(workspacePath: string, workspaceId: string, remote: string): Promise<void> {
+    const res = await requireApi().prStartPolling(workspacePath, workspaceId, remote);
+    unwrap(res, 'pr:start-polling');
+  }
+
+  async stopPolling(workspacePath: string): Promise<void> {
+    const res = await requireApi().prStopPolling(workspacePath);
+    unwrap(res, 'pr:stop-polling');
+  }
+
+  async pollNow(workspacePath: string): Promise<void> {
+    const res = await requireApi().prPollNow(workspacePath);
+    unwrap(res, 'pr:poll-now');
+  }
+
+  /**
+   * Fire-and-forget. The scheduler updates its foreground set when this is
+   * sent and re-plans the cadence (60s foreground / 300s background).
+   */
+  setFocus(workspacePath: string, focused: boolean): void {
+    requireApi().prFocus(workspacePath, focused);
+  }
+
+  onListUpdated(
+    callback: (payload: { workspacePath: string; remote: string }) => void,
+  ): () => void {
+    return requireApi().onPrListUpdated(callback);
+  }
 }
 
 let instance: RendererPullRequestService | null = null;

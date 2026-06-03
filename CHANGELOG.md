@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Internal scaffolding for the upcoming PR review panel: detects whether the `gh` CLI is installed and authenticated, with an onboarding banner that guides install/login without ever storing a GitHub token. (#307)
 - PR review cache schema (`pull_requests`, `pull_request_files`, `pull_request_commits`, `pull_request_checks`) and `worktrees.pr_*` linkage columns, plus a typed `PullRequestsStore` and `WorktreeStore.linkPullRequest` / `findByPullRequest` helpers. (#307)
 - `GhApiService` and IPC channels (`pr:list`, `pr:get`, `pr:files`, `pr:file-contents`, `pr:commits`, `pr:checks`, `pr:conversation`, `pr:refresh`, `pr:detect-remote`) that fetch GitHub data via `gh api` and persist normalized rows to the cache. (#307)
+- `PullRequestPollScheduler` that polls open PRs every 60s when the PR review panel is in the foreground and every 5min otherwise, broadcasting `pr:list-updated` after each successful tick so the renderer re-reads the cache. (#307)
 <!-- New features go here -->
 
 ### Changed

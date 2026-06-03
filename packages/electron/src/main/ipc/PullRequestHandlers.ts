@@ -16,7 +16,7 @@
  */
 
 import log from 'electron-log/main';
-import { safeHandle } from '../utils/ipcRegistry';
+import { safeHandle, safeOn } from '../utils/ipcRegistry';
 import { ghCliDetector, type GhCliStatus } from '../services/GhCliDetector';
 import {
   GhApiService,
@@ -27,6 +27,10 @@ import {
 import { createPullRequestsStore, type PullRequestsStore } from '../services/PullRequestsStore';
 import { GitStatusService } from '../services/GitStatusService';
 import { getDatabase } from '../database/initialize';
+import {
+  initPullRequestPollScheduler,
+  type PullRequestPollScheduler,
+} from '../services/PullRequestPollScheduler';
 import type {
   PullRequestRow,
   PullRequestFileRow,
@@ -59,6 +63,7 @@ function ghErrorResponse(error: unknown): IPCResponse<never> {
 
 let cachedStore: PullRequestsStore | null = null;
 let cachedService: GhApiService | null = null;
+let cachedScheduler: PullRequestPollScheduler | null = null;
 const gitStatusService = new GitStatusService();
 
 function getStore(): PullRequestsStore {
@@ -75,6 +80,12 @@ function getService(): GhApiService {
   if (cachedService) return cachedService;
   cachedService = new GhApiService(getStore());
   return cachedService;
+}
+
+function getScheduler(): PullRequestPollScheduler {
+  if (cachedScheduler) return cachedScheduler;
+  cachedScheduler = initPullRequestPollScheduler(getService());
+  return cachedScheduler;
 }
 
 export function registerPullRequestHandlers(): void {
@@ -297,4 +308,82 @@ export function registerPullRequestHandlers(): void {
       }
     },
   );
+
+  // ----- Poll scheduler (Phase D) ----------------------------------------
+
+  safeHandle(
+    'pr:start-polling',
+    async (
+      _event,
+      workspacePath: string,
+      workspaceId: string,
+      remote: string,
+    ): Promise<IPCResponse<{ started: boolean }>> => {
+      if (!workspacePath || !workspaceId || !remote) {
+        return { success: false, error: 'workspacePath, workspaceId, remote required' };
+      }
+      try {
+        getScheduler().start(workspacePath, workspaceId, remote);
+        return { success: true, data: { started: true } };
+      } catch (error: unknown) {
+        logger.error('pr:start-polling failed', { workspacePath, remote, error });
+        return errorResponse(error);
+      }
+    },
+  );
+
+  safeHandle(
+    'pr:stop-polling',
+    async (_event, workspacePath: string): Promise<IPCResponse<{ stopped: boolean }>> => {
+      if (!workspacePath) {
+        return { success: false, error: 'workspacePath required' };
+      }
+      try {
+        getScheduler().stop(workspacePath);
+        return { success: true, data: { stopped: true } };
+      } catch (error: unknown) {
+        logger.error('pr:stop-polling failed', { workspacePath, error });
+        return errorResponse(error);
+      }
+    },
+  );
+
+  safeHandle(
+    'pr:poll-now',
+    async (_event, workspacePath: string): Promise<IPCResponse<{ ok: boolean }>> => {
+      if (!workspacePath) {
+        return { success: false, error: 'workspacePath required' };
+      }
+      try {
+        await getScheduler().pollNow(workspacePath);
+        return { success: true, data: { ok: true } };
+      } catch (error: unknown) {
+        logger.error('pr:poll-now failed', { workspacePath, error });
+        return errorResponse(error);
+      }
+    },
+  );
+
+  safeOn('pr:focus', (_event, payload: { workspacePath: string; focused: boolean } | undefined) => {
+    if (!payload || typeof payload.workspacePath !== 'string') {
+      logger.warn('pr:focus received invalid payload', { payload });
+      return;
+    }
+    try {
+      getScheduler().setFocus(payload.workspacePath, Boolean(payload.focused));
+    } catch (error: unknown) {
+      logger.warn('pr:focus failed', error);
+    }
+  });
+}
+
+/**
+ * Tear down the poll scheduler. Called from main `app.on('will-quit', ...)`
+ * to clear all timers before the process exits.
+ */
+export function stopPullRequestPollScheduler(): void {
+  if (cachedScheduler) {
+    cachedScheduler.stopAll();
+    cachedScheduler = null;
+  }
 }

@@ -1267,6 +1267,23 @@ interface ElectronAPI {
     number?: number,
   ) => Promise<{ success: boolean; error?: string; data?: { fetchedAt: number } }>;
 
+  // PR review panel — polling scheduler (Phase D of issue #307)
+  prStartPolling: (
+    workspacePath: string,
+    workspaceId: string,
+    remote: string,
+  ) => Promise<{ success: boolean; error?: string; data?: { started: boolean } }>;
+  prStopPolling: (
+    workspacePath: string,
+  ) => Promise<{ success: boolean; error?: string; data?: { stopped: boolean } }>;
+  prPollNow: (
+    workspacePath: string,
+  ) => Promise<{ success: boolean; error?: string; data?: { ok: boolean } }>;
+  prFocus: (workspacePath: string, focused: boolean) => void;
+  onPrListUpdated: (
+    callback: (payload: { workspacePath: string; remote: string }) => void,
+  ) => () => void;
+
   // Archive progress operations
   archive: {
     getTasks: () => Promise<{
