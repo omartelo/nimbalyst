@@ -861,7 +861,9 @@ const EditorMode = forwardRef<EditorModeRef, EditorModeProps>(function EditorMod
       try {
         const savedWidth = await window.electronAPI.getSidebarWidth(workspacePath);
         if (savedWidth && typeof savedWidth === 'number') {
-          setSidebarWidth(savedWidth);
+          // Clamp to the current drag-resize range so a width persisted
+          // under an older, smaller floor doesn't load too narrow.
+          setSidebarWidth(Math.min(Math.max(200, savedWidth), 500));
         }
       } catch (error) {
         console.error('Error loading sidebar width:', error);
