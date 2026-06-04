@@ -45,6 +45,7 @@ import { notificationService } from '../NotificationService';
 import { TrayManager } from '../../tray/TrayManager';
 import { logger } from '../../utils/logger';
 import { windowStates, findWindowByWorkspace, getWindowId, createWindow } from '../../window/WindowManager';
+import { resolveActiveWorkspacePath, resolveActiveWorkspacePathForWindowId } from '../../window/windowState';
 import { sessionFileTracker } from '../SessionFileTracker';
 import { enrichTranscriptMessagesWithToolCallDiffs } from '../TranscriptToolCallEnricher';
 import { extractFilePath } from './tools/extractFilePath';
@@ -2801,8 +2802,10 @@ export class AIService {
           const defaultModel = await ModelRegistry.getDefaultModel('openai-codex');
           const testProvider = new OpenAICodexProvider(apiKey ? { apiKey } : undefined);
           const windowState = windowStates.get(event.sender.id);
+          // Honor the project rail's active selection (#544); fall back to the
+          // window's primary path only when no rail project is active.
           const effectiveWorkspacePath =
-            workspacePath || windowState?.workspacePath;
+            workspacePath || resolveActiveWorkspacePath(windowState);
 
           if (!effectiveWorkspacePath) {
             return {
@@ -3285,16 +3288,12 @@ export class AIService {
         throw new Error('prompt is required');
       }
 
-      // Get workspace path from window state using BrowserWindow lookup
+      // Resolve the workspace from the window, honoring the project rail's
+      // active selection. Reading the raw primary `workspacePath` would route
+      // the new session to the startup project in Multi-Project mode (#544).
       const browserWindow = BrowserWindow.fromWebContents(event.sender);
-      let workspacePath: string | undefined;
-      if (browserWindow) {
-        const windowId = getWindowId(browserWindow);
-        if (windowId !== null) {
-          const windowState = windowStates.get(windowId);
-          workspacePath = windowState?.workspacePath || undefined;
-        }
-      }
+      const windowId = browserWindow ? getWindowId(browserWindow) : null;
+      const workspacePath = resolveActiveWorkspacePathForWindowId(windowId);
       if (!workspacePath) {
         throw new Error('No workspace path available for extension AI prompt');
       }
