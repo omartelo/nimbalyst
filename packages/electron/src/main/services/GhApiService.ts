@@ -291,6 +291,9 @@ interface GhPullPayload {
   deletions?: number;
   changed_files?: number;
   merged?: boolean;
+  // The pulls *list* endpoint omits `merged` but sets `merged_at` on merged
+  // PRs; the single-PR endpoint sets `merged`. Treat either as merged.
+  merged_at?: string | null;
   requested_reviewers?: Array<{ login: string }>;
   labels?: Array<{ name: string }>;
   created_at: string;
@@ -363,7 +366,8 @@ interface GhContentsPayload {
 }
 
 function mapPullToRow(workspaceId: string, remote: Remote, payload: GhPullPayload): PullRequestRow {
-  const state: PullRequestRow['state'] = payload.merged
+  const isMerged = payload.merged === true || Boolean(payload.merged_at);
+  const state: PullRequestRow['state'] = isMerged
     ? 'merged'
     : payload.state === 'closed'
       ? 'closed'
@@ -632,10 +636,17 @@ export class GhApiService {
     return rows;
   }
 
-  async getPullRequest(workspaceId: string, remote: Remote, number: number): Promise<PullRequestRow> {
+  async getPullRequest(
+    workspaceId: string,
+    remote: Remote,
+    number: number,
+    options: { noCache?: boolean } = {},
+  ): Promise<PullRequestRow> {
     const stdout = await this.ghApi(
       buildApiArgs(`repos/${remote}/pulls/${number}`, {
-        cacheSeconds: DEFAULT_CACHE_DETAIL_SECONDS,
+        // After a mutation (merge/approve) we must bypass gh's response cache
+        // or we'd re-read the pre-merge state.
+        cacheSeconds: options.noCache ? 0 : DEFAULT_CACHE_DETAIL_SECONDS,
       }),
     workspaceId,);
     const payload = JSON.parse(stdout.trim()) as GhPullPayload;

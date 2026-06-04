@@ -45,6 +45,7 @@ export function PullRequestActions({
   const [perms, setPerms] = useState<PullRequestPermissions | null>(null);
   const [busy, setBusy] = useState<'approve' | 'merge' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [pendingMethod, setPendingMethod] = useState<MergeMethod | null>(null);
 
   const methodMenu = useFloatingMenu({ placement: 'bottom-end' });
@@ -74,8 +75,10 @@ export function PullRequestActions({
   const handleApprove = useCallback(async () => {
     setBusy('approve');
     setError(null);
+    setNotice(null);
     try {
       await getPullRequestService().approve(workspaceId, remote, pr.number);
+      setNotice('Approved');
       onActed();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Approve failed');
@@ -88,9 +91,11 @@ export function PullRequestActions({
     async (method: MergeMethod) => {
       setBusy('merge');
       setError(null);
+      setNotice(null);
       setPendingMethod(null);
       try {
-        await getPullRequestService().merge(workspaceId, remote, pr.number, method);
+        const res = await getPullRequestService().merge(workspaceId, remote, pr.number, method);
+        setNotice(res.merged ? `Merged (${METHOD_LABEL[method].toLowerCase()})` : 'Merge requested');
         onActed();
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Merge failed');
@@ -111,7 +116,7 @@ export function PullRequestActions({
         data-testid="pr-merged-badge"
       >
         <MaterialSymbol icon="merge" size={14} />
-        Merged
+        {notice ?? 'Merged'}
       </span>
     );
   }
@@ -119,6 +124,9 @@ export function PullRequestActions({
   const showApprove = perms.canApprove;
   const showMerge = perms.canMerge && allowedMethods.length > 0;
   if (!showApprove && !showMerge) {
+    if (notice) {
+      return <span className="text-nim-success text-[11px] flex items-center gap-1" data-testid="pr-action-notice"><MaterialSymbol icon="check_circle" size={13} />{notice}</span>;
+    }
     return error ? <span className="text-nim-error text-[11px]">{error}</span> : null;
   }
 
@@ -132,6 +140,12 @@ export function PullRequestActions({
   return (
     <div className="pr-actions flex items-center gap-2" data-testid="pr-actions">
       {error && <span className="text-nim-error text-[11px] max-w-[220px] truncate" title={error}>{error}</span>}
+      {notice && !error && (
+        <span className="text-nim-success text-[11px] flex items-center gap-1" data-testid="pr-action-notice">
+          <MaterialSymbol icon="check_circle" size={13} />
+          {notice}
+        </span>
+      )}
 
       {showApprove && (
         <button

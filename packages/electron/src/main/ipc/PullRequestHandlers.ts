@@ -518,8 +518,9 @@ export function registerPullRequestHandlers(): void {
       try {
         const service = getService();
         await service.approvePullRequest(workspaceId, remote, number, body);
-        // Refresh detail so the new review shows up; surface to other windows.
-        await service.getPullRequest(workspaceId, remote, number);
+        // Refresh detail (cache-bypass) so the new review shows up; surface to
+        // other windows.
+        await service.getPullRequest(workspaceId, remote, number, { noCache: true });
         emitPrListUpdated(workspaceId, remote);
         return { success: true, data: { ok: true } };
       } catch (error: unknown) {
@@ -544,8 +545,8 @@ export function registerPullRequestHandlers(): void {
       try {
         const service = getService();
         const result = await service.mergePullRequest(workspaceId, remote, number, method);
-        // Re-fetch so the PR flips to merged/closed in the cache + UI.
-        await service.getPullRequest(workspaceId, remote, number);
+        // Re-fetch (cache-bypass) so the PR flips to merged in the cache + UI.
+        await service.getPullRequest(workspaceId, remote, number, { noCache: true });
         emitPrListUpdated(workspaceId, remote);
         return { success: true, data: { merged: result.merged, sha: result.sha } };
       } catch (error: unknown) {
