@@ -941,12 +941,17 @@ export class GhApiService {
     await this.ghApi(args, workspaceId);
   }
 
-  /** Merge the PR with the given method. Throws GhApiError on 405/409/422 (carries stderr). */
+  /**
+   * Merge the PR with the given method. Optional `commitTitle` / `commitMessage`
+   * override the commit subject/body (squash + merge-commit only; GitHub ignores
+   * them for rebase). Throws GhApiError on 405/409/422 (carries stderr).
+   */
   async mergePullRequest(
     workspaceId: string,
     remote: Remote,
     number: number,
     method: MergeMethod,
+    opts: { commitTitle?: string; commitMessage?: string } = {},
   ): Promise<MergeResult> {
     const args = [
       'api',
@@ -960,6 +965,12 @@ export class GhApiService {
       '-f',
       `merge_method=${method}`,
     ];
+    if (opts.commitTitle && opts.commitTitle.trim()) {
+      args.push('-f', `commit_title=${opts.commitTitle}`);
+    }
+    if (opts.commitMessage && opts.commitMessage.trim()) {
+      args.push('-f', `commit_message=${opts.commitMessage}`);
+    }
     const stdout = await this.ghApi(args, workspaceId);
     const payload = JSON.parse(stdout.trim() || '{}') as {
       sha?: string;

@@ -1324,6 +1324,8 @@ interface ElectronAPI {
     remote: string,
     number: number,
     method: 'merge' | 'squash' | 'rebase',
+    commitTitle?: string,
+    commitMessage?: string,
   ) => Promise<{ success: boolean; error?: string; data?: { merged: boolean; sha: string | null } }>;
 
   // PR review panel — polling scheduler (Phase D of issue #307)

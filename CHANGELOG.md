@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Read-only PR detail panel with Conversation, Files Changed (Monaco side-by-side diff), Commits, and Checks tabs; the panel re-fetches its visible tab every 60s while open. (#307)
 - "Open in Worktree" on a PR fetches the PR head branch into a worktree (reused if it already exists), links the worktree to the PR, spawns/reuses an agent session in it, and switches to Agent mode. (#307)
 - Approve and merge a PR (squash / merge commit / rebase) from the detail header, gated by the viewer's `gh`-derived repo permissions and the repo's allowed merge methods; merging requires an explicit in-app confirm. (#307)
+- Edit the merge commit title/message before merging (squash / merge-commit) via the merge dropdown's "Edit commit message…" option. (#307)
 - Inline review threads in the Conversation tab, grouped by file with Open/Resolved status and resolved threads collapsed by default (via `gh api graphql`). (#307)
 - `NIMBALYST_GH_PATH` env var to pin a non-standard `gh` CLI location for PR review. (#307)
 - Per-project GitHub account for PR review: pick a global default `gh` account in User settings and override it per project in Project settings (GitHub panel). The selected account's token is resolved from the `gh` keyring per request and never stored by Nimbalyst. (#307)

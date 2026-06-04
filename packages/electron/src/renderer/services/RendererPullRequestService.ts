@@ -155,8 +155,17 @@ export class RendererPullRequestService {
     remote: string,
     number: number,
     method: MergeMethod,
+    commitTitle?: string,
+    commitMessage?: string,
   ): Promise<{ merged: boolean; sha: string | null }> {
-    const res = await requireApi().prMerge(workspaceId, remote, number, method);
+    const res = await requireApi().prMerge(
+      workspaceId,
+      remote,
+      number,
+      method,
+      commitTitle,
+      commitMessage,
+    );
     return unwrap(res, 'pr:merge');
   }
 

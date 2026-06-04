@@ -538,13 +538,18 @@ export function registerPullRequestHandlers(): void {
       remote: string,
       number: number,
       method: MergeMethod,
+      commitTitle?: string,
+      commitMessage?: string,
     ): Promise<IPCResponse<{ merged: boolean; sha: string | null }>> => {
       if (!workspaceId || !remote || !number || !method) {
         return { success: false, error: 'workspaceId, remote, number, method required' };
       }
       try {
         const service = getService();
-        const result = await service.mergePullRequest(workspaceId, remote, number, method);
+        const result = await service.mergePullRequest(workspaceId, remote, number, method, {
+          commitTitle,
+          commitMessage,
+        });
         // Re-fetch (cache-bypass) so the PR flips to merged in the cache + UI.
         await service.getPullRequest(workspaceId, remote, number, { noCache: true });
         emitPrListUpdated(workspaceId, remote);

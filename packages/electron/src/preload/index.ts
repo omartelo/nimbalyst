@@ -1207,8 +1207,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('pr:permissions', workspaceId, remote, number),
   prApprove: (workspaceId: string, remote: string, number: number, body?: string) =>
     ipcRenderer.invoke('pr:approve', workspaceId, remote, number, body),
-  prMerge: (workspaceId: string, remote: string, number: number, method: string) =>
-    ipcRenderer.invoke('pr:merge', workspaceId, remote, number, method),
+  prMerge: (
+    workspaceId: string,
+    remote: string,
+    number: number,
+    method: string,
+    commitTitle?: string,
+    commitMessage?: string,
+  ) => ipcRenderer.invoke('pr:merge', workspaceId, remote, number, method, commitTitle, commitMessage),
 
   // PR review panel — polling scheduler (Phase D of issue #307)
   prStartPolling: (workspacePath: string, workspaceId: string, remote: string) =>
