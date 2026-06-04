@@ -198,7 +198,7 @@ export const NavigationGutter: React.FC<NavigationGutterProps> = ({
     {
       id: 'pr-review-mode',
       icon: 'merge',
-      label: 'Pull Requests',
+      label: `Pull Requests (${getShortcutDisplay(KeyboardShortcuts.view.prReviewMode)})`,
       contentMode: 'pr-review',
     },
   ];

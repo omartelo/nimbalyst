@@ -49,6 +49,7 @@ export const KeyboardShortcuts = {
     toggleTerminalPanel: 'Ctrl+`',
     trackerMode: 'Cmd+T',
     collabMode: 'Cmd+D',
+    prReviewMode: 'Cmd+U',
     toggleSidebar: 'Cmd+B',
 
     // Navigation
