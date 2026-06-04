@@ -140,7 +140,7 @@ export function PullRequestListView({
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by title or number"
             data-testid="pr-search-input"
-            className="nim-input w-full text-sm py-1.5 pl-7 pr-2"
+            className="nim-input w-full h-8 text-sm !py-0 !pl-7"
           />
         </div>
 
@@ -148,7 +148,7 @@ export function PullRequestListView({
           ref={sortMenu.refs.setReference}
           {...sortMenu.getReferenceProps()}
           onClick={() => sortMenu.setIsOpen(!sortMenu.isOpen)}
-          className="flex items-center gap-1 px-2 py-1.5 text-xs text-nim-muted hover:text-nim border border-nim rounded transition-colors shrink-0"
+          className="flex items-center gap-1 h-8 px-2 text-xs text-nim-muted hover:text-nim border border-nim rounded transition-colors shrink-0"
           data-testid="pr-sort-button"
         >
           <MaterialSymbol icon="sort" size={15} />
