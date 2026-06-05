@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Runtime declaration files now emit to `dist/<path>` matching the `package.json` "exports" type targets, instead of drifting to `dist/runtime/src/<path>`. This left every `@nimbalyst/runtime/...` subpath's types dangling and could fail the electron TypeScript check under exports-based resolution.
 
 ### Removed
 <!-- Removed features go here -->

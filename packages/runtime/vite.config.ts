@@ -48,6 +48,14 @@ export default defineConfig(({ mode }) => ({
       insertTypesEntry: true,
       include: ['src'],
       exclude: ['src/ai/server/providers/mcp-stdio-server.ts'],
+      // Pin the declaration root to src so emitted .d.ts land at
+      // dist/<path-relative-to-src> (e.g. dist/storage/repositories/X.d.ts),
+      // matching the subpath targets in package.json "exports". Without this,
+      // vite-plugin-dts infers the root from the common ancestor of all
+      // compiled files, which drifts up to packages/ and emits to
+      // dist/runtime/src/... -- leaving every "exports" types path dangling and
+      // breaking `@nimbalyst/runtime/...` subpath resolution under exports.
+      entryRoot: resolve(__dirname, 'src'),
     }),
     viteStaticCopy({
       targets: [
