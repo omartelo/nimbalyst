@@ -32,6 +32,21 @@ const DEFAULT_CACHE_DETAIL_SECONDS = 30;
 const API_PAGE_SIZE = 100;
 
 /**
+ * GraphQL query for a PR's inline review threads. Extracted and exported so the
+ * `first:` page-size interpolation is covered by a unit test — it must produce
+ * a template literal (`first:100`), not the literal text `${API_PAGE_SIZE}`.
+ */
+export function buildReviewThreadsQuery(pageSize: number = API_PAGE_SIZE): string {
+  return (
+    `query($owner:String!,$name:String!,$number:Int!){` +
+    `repository(owner:$owner,name:$name){pullRequest(number:$number){` +
+    `reviewThreads(first:${pageSize}){nodes{id isResolved isOutdated path line ` +
+    `comments(first:${pageSize}){nodes{id author{login} body createdAt url}}} ` +
+    `pageInfo{hasNextPage}}}}}`
+  );
+}
+
+/**
  * The `gh` executable to spawn. Honors `NIMBALYST_GH_PATH` so E2E tests can
  * point at a stub and users can pin a non-standard install location; falls
  * back to resolving `gh` on PATH.
@@ -992,12 +1007,7 @@ export class GhApiService {
     number: number,
   ): Promise<ReviewThreadsResult> {
     const [owner, name] = remote.split('/');
-    const query =
-      'query($owner:String!,$name:String!,$number:Int!){' +
-      'repository(owner:$owner,name:$name){pullRequest(number:$number){' +
-      'reviewThreads(first:${API_PAGE_SIZE}){nodes{id isResolved isOutdated path line ' +
-      'comments(first:${API_PAGE_SIZE}){nodes{id author{login} body createdAt url}}} ' +
-      'pageInfo{hasNextPage}}}}}';
+    const query = buildReviewThreadsQuery();
     const args = [
       'api',
       'graphql',
