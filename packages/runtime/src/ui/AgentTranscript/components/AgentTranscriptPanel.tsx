@@ -88,6 +88,8 @@ interface AgentTranscriptPanelProps {
   onCompact?: () => void;
   /** Optional: Edit and re-send the tail user message (see RichTranscriptView). */
   onEditLastUserMessage?: (newContent: string) => Promise<void> | void;
+  /** Optional: When set, the edit pencil renders disabled with this tooltip (see RichTranscriptView). */
+  editLastUserMessageDisabledReason?: string;
   /** Optional: Prompt additions for debugging (system prompt, user message, and attachments) */
   promptAdditions?: {
     systemPromptAddition: string | null;
@@ -147,6 +149,7 @@ const AgentTranscriptPanelComponent = React.forwardRef<
   externalEditorName,
   onCompact,
   onEditLastUserMessage,
+  editLastUserMessageDisabledReason,
   promptAdditions,
   appStartTime,
   renderEmbeddedFile,
@@ -387,6 +390,7 @@ const AgentTranscriptPanelComponent = React.forwardRef<
           onOpenSession={onOpenSession}
           onCompact={onCompact}
           onEditLastUserMessage={onEditLastUserMessage}
+          editLastUserMessageDisabledReason={editLastUserMessageDisabledReason}
           promptAdditions={promptAdditions}
           currentTeammates={currentTeammates ?? sessionData.metadata?.currentTeammates as Array<{ agentId: string; status: 'running' | 'completed' | 'errored' | 'idle' }> | undefined}
           waitingForNoun={waitingForNoun}
@@ -665,6 +669,16 @@ export const AgentTranscriptPanel = React.memo(
       logPanelMemoDiff(nextProps.sessionId, 'currentPhase', {
         prev: prevProps.currentPhase,
         next: nextProps.currentPhase,
+      });
+      return false;
+    }
+
+    // Edit-disabled reason changed - must re-render (toggles the pencil's
+    // active/disabled state when project sync is enabled or disabled).
+    if (prevProps.editLastUserMessageDisabledReason !== nextProps.editLastUserMessageDisabledReason) {
+      logPanelMemoDiff(nextProps.sessionId, 'editLastUserMessageDisabledReason', {
+        prev: prevProps.editLastUserMessageDisabledReason,
+        next: nextProps.editLastUserMessageDisabledReason,
       });
       return false;
     }

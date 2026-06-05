@@ -447,6 +447,13 @@ interface RichTranscriptViewProps {
   onCompact?: () => void;
   /** Edit and re-send the tail user message. Pencil affordance only shows when the last message is a user prompt and the session is idle. */
   onEditLastUserMessage?: (newContent: string) => Promise<void> | void;
+  /**
+   * When set, the edit pencil renders disabled with this string as its tooltip
+   * instead of opening the inline editor. Hosts use this to explain why editing
+   * is unavailable (e.g. the session syncs across devices and an in-place edit
+   * would not propagate to a device that already pulled the original prompt).
+   */
+  editLastUserMessageDisabledReason?: string;
   /** Optional: Prompt additions for debugging (system prompt, user message, and attachments) */
   promptAdditions?: {
     systemPromptAddition: string | null;
@@ -1023,7 +1030,7 @@ export const extractEditsFromToolMessage = (message: TranscriptViewMessage): any
 export const RichTranscriptView = React.forwardRef<
   { scrollToMessage: (index: number) => void; scrollToTop: () => void },
   RichTranscriptViewProps
->(({ sessionId, sessionStatus, isProcessing, hasPendingInteractivePrompt, messages, provider, settings: propsSettings, onSettingsChange, showSettings, documentContext, workspacePath, renderEmptyExtra, hideEmptyHelp, readFile, onOpenFile, onOpenSession, onCompact, onEditLastUserMessage, promptAdditions, currentTeammates, waitingForNoun, appStartTime, renderEmbeddedFile, canEmbedFile, onSearchBarVisibilityChange, persistScrollState = true }, ref) => {
+>(({ sessionId, sessionStatus, isProcessing, hasPendingInteractivePrompt, messages, provider, settings: propsSettings, onSettingsChange, showSettings, documentContext, workspacePath, renderEmptyExtra, hideEmptyHelp, readFile, onOpenFile, onOpenSession, onCompact, onEditLastUserMessage, editLastUserMessageDisabledReason, promptAdditions, currentTeammates, waitingForNoun, appStartTime, renderEmbeddedFile, canEmbedFile, onSearchBarVisibilityChange, persistScrollState = true }, ref) => {
   const [collapsedMessages, setCollapsedMessages] = useState<Set<number>>(new Set());
   const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
   const scrollButtonRef = useRef<HTMLDivElement>(null);
@@ -2167,19 +2174,30 @@ export const RichTranscriptView = React.forwardRef<
               && !!onEditLastUserMessage
               && editingMessageIndex !== index
               && (
-                <button
-                  onClick={() => {
-                    const stripped = (message.text ?? '')
-                      .replace(/\s*<NIMBALYST_SYSTEM_MESSAGE>[\s\S]*?<\/NIMBALYST_SYSTEM_MESSAGE>/g, '')
-                      .trim();
-                    setEditDraft(stripped);
-                    setEditingMessageIndex(index);
-                  }}
-                  className="rich-transcript-edit-button p-1.5 rounded-md bg-[var(--nim-bg-secondary)] border border-[var(--nim-border)] cursor-pointer transition-all flex items-center justify-center hover:bg-[var(--nim-bg-hover)]"
-                  title="Edit and re-send this message"
-                >
-                  <MaterialSymbol icon="edit" size={16} className="text-[var(--nim-text-faint)]" />
-                </button>
+                editLastUserMessageDisabledReason ? (
+                  <button
+                    type="button"
+                    disabled
+                    className="rich-transcript-edit-button rich-transcript-edit-button--disabled p-1.5 rounded-md bg-[var(--nim-bg-secondary)] border border-[var(--nim-border)] cursor-not-allowed opacity-50 flex items-center justify-center"
+                    title={editLastUserMessageDisabledReason}
+                  >
+                    <MaterialSymbol icon="edit" size={16} className="text-[var(--nim-text-faint)]" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      const stripped = (message.text ?? '')
+                        .replace(/\s*<NIMBALYST_SYSTEM_MESSAGE>[\s\S]*?<\/NIMBALYST_SYSTEM_MESSAGE>/g, '')
+                        .trim();
+                      setEditDraft(stripped);
+                      setEditingMessageIndex(index);
+                    }}
+                    className="rich-transcript-edit-button p-1.5 rounded-md bg-[var(--nim-bg-secondary)] border border-[var(--nim-border)] cursor-pointer transition-all flex items-center justify-center hover:bg-[var(--nim-bg-hover)]"
+                    title="Edit and re-send this message"
+                  >
+                    <MaterialSymbol icon="edit" size={16} className="text-[var(--nim-text-faint)]" />
+                  </button>
+                )
               )}
             {editingMessageIndex !== index && (
               <button

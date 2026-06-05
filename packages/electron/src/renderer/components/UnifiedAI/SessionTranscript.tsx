@@ -85,6 +85,7 @@ import {
   loadInitialQueuedPrompts,
 } from '../../store';
 import { streamCompletionSignalAtom } from '../../store/atoms/sessionTranscript';
+import { syncStatusUpdateAtom } from '../../store/atoms/syncStatus';
 import { convertToWorkstreamAtom, sessionPromptAdditionsAtom, sessionLastSubmitAtAtom, sessionDraftLocalModifiedAtAtom, nextOptimisticId } from '../../store/atoms/sessions';
 import { clearAIInputHistoryAtom } from '../../store/atoms/aiInputUndo';
 import { scrollToTeammateAtom, scrollToMessageAtom, requestOpenSessionAtom } from '../../store/atoms/agentMode';
@@ -193,6 +194,17 @@ interface Todo {
   content: string;
   activeForm: string;
 }
+
+/**
+ * Tooltip shown on the disabled edit pencil when the session's project syncs
+ * across devices. Editing rewrites the tail row of ai_agent_messages in place,
+ * and the sync protocol only propagates appended rows (no message_updated
+ * variant) -- so a device that already pulled the original prompt would keep
+ * rendering it. We gate the affordance off rather than let the two devices
+ * diverge. See PR #503.
+ */
+const EDIT_DISABLED_WHILE_SYNCED_REASON =
+  'Editing is unavailable while this project syncs across devices';
 
 export interface SessionTranscriptRef {
   focusInput: () => void;
@@ -623,6 +635,33 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
 
   // Error state - centralized in atom, updated by sessionTranscriptListeners
   const sessionError = useAtomValue(sessionErrorAtom(sessionId));
+
+  // Whether this session's project is enabled for multi-device sync. The
+  // edit-last-message affordance is gated off when true (see
+  // EDIT_DISABLED_WHILE_SYNCED_REASON). We re-query on every sync status
+  // broadcast so toggling sync for the project flips the pencil at runtime.
+  const syncStatusUpdate = useAtomValue(syncStatusUpdateAtom);
+  const [isProjectSynced, setIsProjectSynced] = useState(false);
+  useEffect(() => {
+    if (!workspacePath) {
+      setIsProjectSynced(false);
+      return;
+    }
+    let cancelled = false;
+    window.electronAPI.invoke('sync:get-status', workspacePath)
+      .then((status: { appConfigured?: boolean; projectEnabled?: boolean } | null) => {
+        if (cancelled) return;
+        setIsProjectSynced(Boolean(status?.appConfigured && status?.projectEnabled));
+      })
+      .catch(() => {
+        if (!cancelled) setIsProjectSynced(false);
+      });
+    return () => { cancelled = true; };
+  }, [workspacePath, syncStatusUpdate]);
+
+  const editLastUserMessageDisabledReason = isProjectSynced
+    ? EDIT_DISABLED_WHILE_SYNCED_REASON
+    : undefined;
 
   // Track mode at last message send to detect mode transitions via toggle button
 
@@ -2155,6 +2194,7 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
             externalEditorName={externalEditorName}
             onCompact={handleCompact}
             onEditLastUserMessage={handleEditLastUserMessage}
+            editLastUserMessageDisabledReason={editLastUserMessageDisabledReason}
             promptAdditions={showPromptAdditions ? promptAdditions : null}
             currentTeammates={transcriptTeammates}
             waitingForNoun={waitingForNoun}
