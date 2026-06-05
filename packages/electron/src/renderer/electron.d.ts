@@ -936,6 +936,7 @@ interface ElectronAPI {
         orgKeyFingerprint: string | null;
         serverUrl: string;
         userId: string;
+        personalOrgId?: string;
         userName?: string;
         userEmail?: string;
       };
