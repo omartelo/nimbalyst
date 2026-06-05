@@ -23,16 +23,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NIMBALYST_GH_PATH` env var to pin a non-standard `gh` CLI location for PR review. (#307)
 - Per-project GitHub account for PR review: pick a global default `gh` account in User settings and override it per project in Project settings (GitHub panel). The selected account's token is resolved from the `gh` keyring per request and never stored by Nimbalyst. (#307)
 - A guided walkthrough that introduces the PR review mode from the navigation gutter. (#307)
+- Refresh button in the Files Mode sidebar header reloads the file tree from disk without using the Developer menu. (#259)
 <!-- New features go here -->
+- Claude Code sessions use the SDK's `permissionMode: 'auto'` classifier when workspace trust is "Allow All"; safe operations run silently, uncertain ones prompt the user. (#379)
+- File paths mentioned in AI transcripts are now clickable links that open the file, even when the agent writes them as plain text or inline code.
+- New Browser Tab command in the File menu (Cmd+Shift+B) opens a browser virtual tab in files mode.
+- Quick Open's Sessions tab can now search message contents (Shift+Tab or the in-input button), not just titles.
+- Inline comments on shared documents: select text to add a comment, reply in threads with @-mentions, and resolve threads, all synced in realtime across collaborators.
 
 ### Changed
 <!-- Changes to existing functionality go here -->
+- Calc Sheets now ship a Falcon 9 `.calc.md` demo and custom syntax coloring for headings, comments, variables, units, and formatters.
 
 ### Fixed
 - PR review now shows an actionable message on a GitHub 404 (repo not found or the active `gh` account lacks access — check `gh auth status` / `gh auth switch`) instead of a raw error, and no longer prints a duplicated `api` in the failure text. (#307)
 - PR review cache tables are now created on the better-sqlite3 backend too (migration registered with the SQLite runner), not only on PGLite. (#307)
 - PR review: merged PRs now show as "Merged" (not "Closed") in the list, the Approve/Merge buttons refresh immediately after a merge (cache-bypassed refetch), and a success notice / "Merged" badge confirms the action. (#307)
 <!-- Bug fixes go here -->
+- Effort Level selector now takes effect: sessions follow the selected/default effort instead of always running at "high".
+- Typing in the chat box no longer has keystrokes hijacked into an open markdown file while an agent is editing it.
+- Restored diff application in headless mode (tests and server-side diffing), which had started throwing on `getRootElement` after the chat-box focus fix.
+- Browser extension toolbar and URL bar now use the active theme's colors instead of rendering with a white URL box in dark mode.
 
 ### Removed
 <!-- Removed features go here -->
