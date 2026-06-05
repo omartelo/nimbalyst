@@ -45,7 +45,7 @@ import { notificationService } from '../NotificationService';
 import { TrayManager } from '../../tray/TrayManager';
 import { logger } from '../../utils/logger';
 import { windowStates, findWindowByWorkspace, getWindowId, createWindow } from '../../window/WindowManager';
-import { resolveActiveWorkspacePath, resolveActiveWorkspacePathForWindowId } from '../../window/windowState';
+import { resolveActiveWorkspacePathForWindowId } from '../../window/windowState';
 import { sessionFileTracker } from '../SessionFileTracker';
 import { enrichTranscriptMessagesWithToolCallDiffs } from '../TranscriptToolCallEnricher';
 import { extractFilePath } from './tools/extractFilePath';
@@ -2801,11 +2801,13 @@ export class AIService {
         if (provider === 'openai-codex') {
           const defaultModel = await ModelRegistry.getDefaultModel('openai-codex');
           const testProvider = new OpenAICodexProvider(apiKey ? { apiKey } : undefined);
-          const windowState = windowStates.get(event.sender.id);
-          // Honor the project rail's active selection (#544); fall back to the
-          // window's primary path only when no rail project is active.
+          // Honor the project rail's active selection (#544). windowStates is
+          // keyed by Nimbalyst's window id, not webContents.id, so resolve the
+          // window id via getWindowId before the lookup.
+          const browserWindow = BrowserWindow.fromWebContents(event.sender);
+          const windowId = browserWindow ? getWindowId(browserWindow) : null;
           const effectiveWorkspacePath =
-            workspacePath || resolveActiveWorkspacePath(windowState);
+            workspacePath || resolveActiveWorkspacePathForWindowId(windowId);
 
           if (!effectiveWorkspacePath) {
             return {
