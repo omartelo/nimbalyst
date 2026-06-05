@@ -25,6 +25,7 @@ import { isToolLikeMessage } from '@nimbalyst/runtime/ui/AgentTranscript/utils/m
 import { AIInput, AIInputRef } from './AIInput';
 import { PromptQueueList } from './PromptQueueList';
 import { TranscriptEmbeddedFileCard } from './TranscriptEmbeddedFileCard';
+import { getDiffPeekSizeForInteractiveWidgetHost } from './interactiveWidgetHostProxy';
 import { customEditorRegistry } from '../CustomEditors/registry';
 import { useDialog } from '../../contexts/DialogContext';
 import { FileGutter } from '../AIChat/FileGutter';
@@ -92,6 +93,7 @@ import { usePostHog } from 'posthog-js/react';
 import { setAgentModeSettingsAtom, showPromptAdditionsAtom, hasExternalEditorAtom, externalEditorNameAtom, openInExternalEditorAtom, defaultAgentModelAtom, defaultEffortLevelAtom, chatShowToolCallsAtom } from '../../store/atoms/appSettings';
 import { supportsEffortLevel, parseEffortLevel, type EffortLevel } from '../../utils/modelUtils';
 import { buildPlanImplementationPrompt, resolvePlanFilePath } from '../../utils/pathUtils';
+import { resolveTranscriptClickPath } from '../../utils/resolveTranscriptClickPath';
 import { autoCommitEnabledAtom, setAutoCommitEnabledAtom } from '../../store/atoms/autoCommitAtoms';
 import { diffPeekSizeAtom, setDiffPeekSizeAtom } from '../../store/atoms/diffPeekSizeAtoms';
 import { registerSessionWorkspace, loadInitialSessionFileState } from '../../store/listeners/fileStateListeners';
@@ -272,7 +274,7 @@ const readFile = async (filePath: string): Promise<{ success: boolean; content?:
   try {
     const result = await window.electronAPI.readFileContent(filePath);
     if (!result) {
-      return { success: false, error: 'No response from file reader' };
+      return { success: false, error: `File not found: ${filePath}` };
     }
     if (!result.success) {
       return { success: false, error: result.error || 'Failed to read file' };
@@ -1130,8 +1132,9 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
   }, [sessionId, setIsProcessing]);
 
   const handleFileClick = useCallback((filePath: string) => {
-    onFileClick?.(filePath);
-  }, [onFileClick]);
+    const baseDir = sessionWorktreePath ?? workspacePath;
+    onFileClick?.(resolveTranscriptClickPath(filePath, baseDir));
+  }, [onFileClick, sessionWorktreePath, workspacePath]);
 
   const setRequestOpenSession = useSetAtom(requestOpenSessionAtom);
   const handleOpenSession = useCallback((targetSessionId: string) => {
@@ -1756,7 +1759,7 @@ export const SessionTranscript = forwardRef<SessionTranscriptRef, SessionTranscr
       get workspacePath() { return liveHostRef.current?.workspacePath ?? (workspacePath || ''); },
       get worktreeId() { return liveHostRef.current?.worktreeId ?? worktreeId; },
       get autoCommitEnabled() { return liveHostRef.current?.autoCommitEnabled ?? false; },
-      get diffPeekSize() { return liveHostRef.current?.diffPeekSize ?? { width: 0, height: 0 }; },
+      get diffPeekSize() { return getDiffPeekSizeForInteractiveWidgetHost(liveHostRef.current); },
       askUserQuestionSubmit: (...args) => liveHostRef.current!.askUserQuestionSubmit(...args),
       askUserQuestionCancel: (...args) => liveHostRef.current!.askUserQuestionCancel(...args),
       requestUserInputSubmit: (...args) => liveHostRef.current!.requestUserInputSubmit(...args),

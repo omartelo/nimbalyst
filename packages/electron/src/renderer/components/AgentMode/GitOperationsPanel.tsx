@@ -429,8 +429,12 @@ export const GitOperationsPanel: React.FC<GitOperationsPanelProps> = React.memo(
             .join('\n');
 
           message += `\n\nHere are the files edited ${scope} that have uncommitted changes:\n${fileList}`;
-          message += '\n\nCall developer_git_commit_proposal immediately with these files.';
-          message += '\nDo NOT call get_session_edited_files, get_workstream_edited_files, or git diff -- the data is already provided above.';
+          message += '\n\nThis list covers files edited directly. If you ALSO ran commands this session that change files as a side effect ' +
+            '(e.g. npm install rewriting package-lock.json, a build/codegen step, license regeneration), include those changed files too -- ' +
+            'check git status for them. If you ran no such commands, the list above is complete; do not go looking. ' +
+            'Either way, do NOT add unrelated uncommitted changes -- other concurrent sessions may have their own work in this repo.';
+          message += '\n\nThen call developer_git_commit_proposal with the file list.';
+          message += '\nDo NOT call get_session_edited_files or get_workstream_edited_files -- the edited-file data is already provided above.';
         } else if (commitContext.success && commitContext.files.length === 0) {
           message += '\n\nNo session-edited files have uncommitted changes. Check git status to see if there are any other uncommitted changes to commit.';
         } else {

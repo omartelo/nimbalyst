@@ -97,6 +97,13 @@ import {
   removeNimAssetRoot,
 } from './protocols/nimAssetProtocol';
 import {
+  registerNimPreviewSchemeAsPrivileged,
+  registerNimPreviewProtocolHandler,
+  addNimPreviewWorkspaceRoot,
+} from './protocols/nimPreviewProtocol';
+import { registerBrowserSessionHandlers } from './ipc/BrowserSessionHandlers';
+import { BrowserSessionService } from './services/BrowserSessionService';
+import {
   registerCollabAssetSchemeAsPrivileged,
   installCollabAssetProtocolHandler,
 } from './protocols/collabAssetProtocol';
@@ -180,6 +187,7 @@ if (process.platform === 'win32') {
 // privileged before the app is ready or the renderer treats them as opaque
 // origins. The actual request handler is wired up after whenReady.
 registerNimAssetSchemeAsPrivileged();
+registerNimPreviewSchemeAsPrivileged();
 registerCollabAssetSchemeAsPrivileged();
 
 // NOTE: User data directory configuration is handled in bootstrap.ts
@@ -1153,6 +1161,15 @@ app.whenReady().then(async () => {
     // added to its allowlist below, as windows register their workspace path.
     registerNimAssetProtocolHandler();
 
+    // `nim-preview://` serves HTML/CSS/JS assets from active workspaces to the
+    // BrowserSessionService's WebContentsView. Workspaces are added to the
+    // allowlist alongside nim-asset below.
+    registerNimPreviewProtocolHandler();
+
+    // Browser session IPC handlers + state-changed event broadcast. The
+    // service itself owns the WebContentsView pool.
+    registerBrowserSessionHandlers();
+
     // collab-asset:// E2E-encrypted document attachment handler.
     // Same-origins the production worker request from Chromium's perspective,
     // so we can keep webSecurity:true. The per-doc registry is populated by
@@ -1942,6 +1959,10 @@ app.whenReady().then(async () => {
     // enforced by the MCP servers. Mirrors the pattern used for
     // `meta-agent:get-server-port`.
     if (process.env.PLAYWRIGHT === '1' || process.env.PLAYWRIGHT_TEST === 'true' || process.env.NODE_ENV === 'test') {
+        safeHandle('mcp:get-server-port', async () => {
+            const port = (global as any).mcpServerPort;
+            return { success: typeof port === 'number', port: typeof port === 'number' ? port : null };
+        });
         safeHandle('mcp:get-auth-token', async () => {
             const token = getMcpAuthToken();
             return { success: token !== null, token };
@@ -2078,6 +2099,9 @@ app.whenReady().then(async () => {
             // Issue #146: also allow `nim-asset://` to serve images from the
             // workspace. addNimAssetRoot is idempotent.
             addNimAssetRoot(state.workspacePath);
+            // Browser previews serve HTML/CSS/JS from the same workspace via
+            // the `nim-preview://` scheme.
+            addNimPreviewWorkspaceRoot(state.workspacePath);
         } else {
             logger.mcp.warn(`Cannot register workspace: workspacePath=${state?.workspacePath}, windowId=${windowId}`);
         }
@@ -2585,6 +2609,14 @@ app.on('before-quit', async (event) => {
         await stopAllWorkspaceWatchers();
         const t3 = Date.now();
         console.log(`[QUIT] [${t3}] stopAllWorkspaceWatchers returned (${t3-t2}ms)`);
+
+        // Tear down any in-flight browser preview sessions so we don't leak
+        // WebContentsViews if the host windows are torn down asynchronously.
+        try {
+            BrowserSessionService.getInstance().cleanup();
+        } catch (e) {
+            console.warn('[QUIT] BrowserSessionService cleanup error:', e);
+        }
 
         if (canWriteLogs && debugLog) {
             try {

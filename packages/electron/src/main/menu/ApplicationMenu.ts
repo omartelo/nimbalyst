@@ -287,6 +287,34 @@ export async function createApplicationMenu() {
                     }
                 },
                 {
+                    id: 'file-new-browser-tab',
+                    label: 'New Browser Tab',
+                    accelerator: KeyboardShortcuts.file.newBrowserTab,
+                    click: async () => {
+                        const focusedWindow = getFocusedWindow();
+                        if (!focusedWindow) return;
+
+                        const windowId = getWindowId(focusedWindow);
+                        if (windowId === null) return;
+
+                        const state = windowStates.get(windowId);
+                        if (state?.mode !== 'workspace' || !state.workspacePath) return;
+
+                        AnalyticsService.getInstance().sendEvent('menu_action_used', {
+                            menu: 'file',
+                            action: 'new_browser_tab',
+                            hasKeyboardEquivalent: true,
+                        });
+
+                        // Switch to files mode first (in case we're in agent mode),
+                        // then open the browser virtual tab once the mode settles.
+                        focusedWindow.webContents.send('set-content-mode', 'files');
+                        setTimeout(() => {
+                            focusedWindow.webContents.send('file-new-browser-tab');
+                        }, 50);
+                    }
+                },
+                {
                     id: 'file-new-extension-project',
                     label: 'New Extension Project...',
                     click: async () => {
@@ -1270,87 +1298,6 @@ export async function createApplicationMenu() {
                             console.error('Failed to open user data directory:', err);
                             dialog.showErrorBox('Error', `Could not open user data directory at: ${userDataPath}`);
                         });
-                    }
-                },
-                {
-                    label: 'Reset Canonical Transcript Table',
-                    click: async () => {
-                        const focused = getFocusedWindow();
-
-                        const confirmOptions: Electron.MessageBoxOptions = {
-                            type: 'warning',
-                            title: 'Reset Canonical Transcript Table',
-                            message: 'This will drop and re-create the ai_transcript_events table.',
-                            detail: 'All canonical transcript data will be deleted. Old sessions will lazily re-transform from raw logs on next access. The raw ai_agent_messages table is NOT affected.\n\nThis cannot be undone.',
-                            buttons: ['Cancel', 'Reset'],
-                            defaultId: 0,
-                            cancelId: 0,
-                        };
-
-                        const { response } = focused
-                            ? await dialog.showMessageBox(focused, confirmOptions)
-                            : await dialog.showMessageBox(confirmOptions);
-
-                        if (response !== 1) return;
-
-                        try {
-                            const { TRANSCRIPT_EVENTS_CREATE_TABLE, TRANSCRIPT_EVENTS_INDEXES } = require('../database/schemas/transcriptEvents');
-
-                            // Drop the table (CASCADE handles foreign key references)
-                            await database.query('DROP TABLE IF EXISTS ai_transcript_events CASCADE');
-
-                            // Re-create the table with full schema from shared definition
-                            await database.query(TRANSCRIPT_EVENTS_CREATE_TABLE);
-
-                            // Re-create all indexes (PGLite requires one statement per query)
-                            for (const stmt of TRANSCRIPT_EVENTS_INDEXES) {
-                                await database.query(stmt);
-                            }
-
-                            // Reindex ai_sessions to fix any corrupted B-tree entries
-                            // before the UPDATE (which internally creates new row versions
-                            // and can fail uniqueness checks against stale index entries).
-                            await database.exec('REINDEX TABLE ai_sessions');
-
-                            // Reset canonical projection metadata on all sessions
-                            await database.query(`
-                                UPDATE ai_sessions SET
-                                    canonical_transform_version = NULL,
-                                    canonical_last_raw_message_id = NULL,
-                                    canonical_last_transformed_at = NULL,
-                                    canonical_transform_status = NULL
-                            `);
-
-                            console.log('[Developer Menu] Canonical transcript table reset successfully');
-
-                            const successOptions: Electron.MessageBoxOptions = {
-                                type: 'info',
-                                title: 'Reset Complete',
-                                message: 'Canonical transcript table has been reset.',
-                                detail: 'The ai_transcript_events table was dropped and re-created. All session projection metadata has been cleared. Sessions will lazily re-transform on next access.',
-                                buttons: ['OK']
-                            };
-                            if (focused) {
-                                dialog.showMessageBox(focused, successOptions);
-                            } else {
-                                dialog.showMessageBox(successOptions);
-                            }
-                        } catch (error) {
-                            console.error('[Developer Menu] Failed to reset canonical transcript table:', error);
-                            const errMsg = error instanceof Error ? error.message : String(error);
-                            const errorOptions: Electron.MessageBoxOptions = {
-                                type: 'error',
-                                title: 'Reset Failed',
-                                message: 'Failed to reset canonical transcript table.',
-                                detail: errMsg,
-                                buttons: ['OK']
-                            };
-                            if (focused) {
-                                dialog.showMessageBox(focused, errorOptions);
-                            } else {
-                                dialog.showMessageBox(errorOptions);
-                            }
-                        }
                     }
                 },
                 { type: 'separator' },

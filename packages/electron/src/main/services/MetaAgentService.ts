@@ -62,6 +62,25 @@ interface CreateChildSessionArgs {
   worktreeId?: string;
 }
 
+function normalizeStoredChildModelIdentifier(
+  provider: string | null | undefined,
+  model: string | null | undefined
+): string | null {
+  if (!model) {
+    return null;
+  }
+
+  if (provider === 'claude-code' || model.startsWith('claude-code:')) {
+    const parsed = ModelIdentifier.parse(model);
+    if (provider === 'claude-code' && parsed.provider !== 'claude-code') {
+      throw new Error(`Claude Agent child sessions require a claude-code:* model identifier. Received: ${model}`);
+    }
+    return parsed.combined;
+  }
+
+  return model;
+}
+
 interface SpawnSessionArgs {
   title?: string;
   prompt: string;
@@ -350,11 +369,37 @@ export class MetaAgentService {
       throw new Error('useWorktree and worktreeId cannot be combined');
     }
 
-    const defaultModel = getDefaultAIModel() || 'claude-code:opus';
-    const model = args.model || defaultModel;
+    // Inherit the calling session's provider+model as the primary fallback so a
+    // non-Claude parent (Gemini, OpenAI-Codex, LM Studio, etc.) spawning a child
+    // via the meta-agent tools without an explicit model does NOT silently land
+    // on the hardcoded Opus default and bill the user's Anthropic pool. Only fall
+    // through to getDefaultAIModel() / the last-resort default when the parent
+    // session cannot be loaded (orphan call) or carries no usable provider+model.
+    // An explicit args.provider/args.model still wins; that is what they are for.
+    let parentProvider: string | null = null;
+    let parentModel: string | null = null;
+    try {
+      const parentSession = await AISessionsRepository.get(metaSessionId);
+      if (parentSession) {
+        parentProvider = parentSession.provider ?? null;
+        parentModel = normalizeStoredChildModelIdentifier(parentProvider, parentSession.model ?? null);
+      }
+    } catch {
+      // Best-effort lookup; fall through to the hardcoded default below.
+    }
+
+    const defaultModel =
+      parentModel
+      || normalizeStoredChildModelIdentifier(null, getDefaultAIModel())
+      || 'claude-code:opus';
+    const explicitModel = normalizeStoredChildModelIdentifier(args.provider ?? parentProvider, args.model ?? null);
+    const model = explicitModel || defaultModel;
     const parsed = ModelIdentifier.tryParse(model);
-    const provider = (args.provider || parsed?.provider || 'claude-code') as AIProviderType;
-    const normalizedModel = args.model || ModelIdentifier.getDefaultModelId(provider);
+    const provider = (args.provider || parsed?.provider || parentProvider || 'claude-code') as AIProviderType;
+    // When the caller didn't pass an explicit model, prefer the inherited parent
+    // model verbatim (so a gemini-flash-3.5 parent keeps flash-3.5, not whatever
+    // ModelIdentifier.getDefaultModelId returns for that provider).
+    const normalizedModel = explicitModel || parentModel || ModelIdentifier.getDefaultModelId(provider);
     const callerProvidedTitle = !!args.title?.trim();
     const title = (args.title || this.deriveTitleFromPrompt(args.prompt) || 'Meta Task').trim();
 
