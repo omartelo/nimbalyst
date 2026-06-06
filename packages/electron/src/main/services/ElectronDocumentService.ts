@@ -969,10 +969,13 @@ export class ElectronDocumentService implements DocumentService {
       return null;
     }
 
-    // Find the virtual document descriptor
+    // Find the virtual document descriptor. Only built-in virtual docs (welcome,
+    // tracker views, etc.) have loadable text content here. Extension-owned
+    // virtual tabs (e.g. `virtual://com.nimbalyst.browser/…`) are rendered by
+    // their custom editor and have no content to load, so a miss is expected --
+    // return null quietly rather than logging an error on every such tab open.
     const virtualDoc = Object.values(VIRTUAL_DOCS).find(doc => doc.virtualPath === virtualPath);
     if (!virtualDoc) {
-      console.error(`[DocumentService] Unknown virtual document: ${virtualPath}`);
       return null;
     }
 
@@ -1791,8 +1794,13 @@ export class ElectronDocumentService implements DocumentService {
     if (fileContent !== null) {
       let updatedContent: string;
       if (source === 'inline') {
-        // Inline items: rewrite #type[...] metadata in the line
-        const result = updateInlineTrackerItem(fileContent, itemId, updates);
+        // Inline items: rewrite #type[...] metadata in the line. Markers without
+        // an explicit id: are located via the row's line + title, since the id is
+        // a deterministic hash that never reaches the file (GitHub #404).
+        const result = updateInlineTrackerItem(fileContent, itemId, updates, {
+          lineNumber: row.line_number != null ? Number(row.line_number) : undefined,
+          title: typeof row.title === 'string' ? row.title : undefined,
+        });
         if (!result) {
           throw new Error(`Could not find inline item ${itemId} in ${relativePath}`);
         }
