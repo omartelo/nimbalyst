@@ -65,7 +65,9 @@ ${firstTurnSection}
 
 Call again to update tags or phase as work progresses.${subsequentCallsSuffix}
 
-- Update phase: \`{ "phase": "validating" }\`
+- Update phase for plan-only work: \`{ "phase": "planning" }\`
+- Update phase when implementation begins: \`{ "phase": "implementing" }\`
+- Update phase when implementation is being tested/reviewed: \`{ "phase": "validating" }\`
 - Add/remove tags: \`{ "add": ["committed"], "remove": ["uncommitted"] }\`
 
 You do NOT need to call this on every message -- only when the nature of the work changes.
@@ -90,7 +92,9 @@ Bad examples: "Fix null check in handleAuth" (too specific), "Update code" (too 
 
 - Phase controls which kanban column the session appears in
 - Valid phases: "backlog", "planning", "implementing", "validating", "complete"
-- Choose based on the current state of work
+- Use "planning" for exploration, research, design, and writing plans. If the session only produced a plan/design/research artifact, it stays "planning" even when that deliverable is complete.
+- Use "implementing" only once concrete implementation work starts.
+- Use "validating" only after implementation exists and is being tested or reviewed.
 
 ### Commit tracking
 

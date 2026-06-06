@@ -22,4 +22,15 @@ describe('buildClaudeCodeSystemPrompt', () => {
     expect(prompt).toContain('`mcp__nimbalyst-mcp__AskUserQuestion`');
     expect(prompt).toContain('`mcp__nimbalyst-mcp__PromptForUserInput`');
   });
+
+  it('keeps plan-only sessions in planning', () => {
+    const prompt = buildClaudeCodeSystemPrompt({
+      toolReferenceStyle: 'codex',
+      hasSessionNaming: true,
+    });
+
+    expect(prompt).toContain('Update phase for plan-only work: `{ "phase": "planning" }`');
+    expect(prompt).toContain('If the session only produced a plan/design/research artifact, it stays "planning"');
+    expect(prompt).toContain('Use "validating" only after implementation exists and is being tested or reviewed.');
+  });
 });
