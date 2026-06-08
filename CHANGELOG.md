@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Launching an action in a new session with a different provider's model (e.g. "Implement in Codex" from a Claude session) no longer fails with a model-identifier error.
 - Synced tracker item bodies containing lists or links now load for teammates instead of appearing blank.
 - Voice mode connects again after OpenAI retired the Realtime Beta API (migrated desktop and iOS to the GA shape).
+- Renaming or moving a project no longer fails and rolls back on the SQLite backend.
 
 ### Removed
 <!-- Removed features go here -->
