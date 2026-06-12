@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Linked tracker items now show up and survive linking additional items on the SQLite backend, and commits link to session trackers again.
 - Stopping an already-idle Claude Code CLI session no longer quits the CLI and leaves the session unresponsive.
 - Claude Agent startup crashes now log detailed spawn diagnostics and auto-capture a CLI debug log on retry, and the real error message reaches the renderer log (#614).
+- HTML preview renders again instead of a blank pane (or a Windows Store popup), and in-workspace files on Windows are no longer rejected over drive-letter casing (#612, #625).
 
 ### Removed
 <!-- Removed features go here -->
