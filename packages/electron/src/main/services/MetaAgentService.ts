@@ -22,6 +22,7 @@ import {
 } from '../mcp/metaAgentServer';
 import { computeNotificationSignature } from './metaAgentNotificationSignature';
 import { extractMessageText, extractUserPrompts } from './metaAgentMessageText';
+import { ClaudeCliLauncherConfig } from './ai/claudeCliLauncherSingleton';
 
 type SessionStatusValue = 'idle' | 'running' | 'waiting_for_input' | 'error' | 'interrupted';
 type PromptType = 'permission_request' | 'ask_user_question_request' | 'exit_plan_mode_request';
@@ -192,6 +193,7 @@ export class MetaAgentService {
       ClaudeCodeProvider.setMetaAgentServerPort(result.port);
       OpenAICodexProvider.setMetaAgentServerPort(result.port);
       OpenAICodexACPProvider.setMetaAgentServerPort(result.port);
+      ClaudeCliLauncherConfig.setMetaAgentServerPort(result.port);
 
       this.unsubscribeStateListener = getSessionStateManager().subscribe((event) => {
         // NIM-6 follow-up: dedup signatures only describe one turn; clear them
@@ -230,6 +232,7 @@ export class MetaAgentService {
     ClaudeCodeProvider.setMetaAgentServerPort(null);
     OpenAICodexProvider.setMetaAgentServerPort(null);
     OpenAICodexACPProvider.setMetaAgentServerPort(null);
+    ClaudeCliLauncherConfig.setMetaAgentServerPort(null);
     this.serverPort = null;
     this.started = false;
   }

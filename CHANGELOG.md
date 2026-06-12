@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 <!-- Bug fixes go here -->
+- Claude Code CLI sessions can now spawn sessions via the meta-agent tools, and prompts sent to them while closed (spawned sessions, restart continuations, scheduled wakeups) launch the CLI and deliver instead of failing.
 
 ### Removed
 <!-- Removed features go here -->

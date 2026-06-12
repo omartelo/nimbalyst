@@ -107,6 +107,8 @@ import { MessageStreamingHandler } from './MessageStreamingHandler';
 import { HooklessAgentFileWatcher } from './HooklessAgentFileWatcher';
 import { getAgentWorkflowService } from '../AgentWorkflowService';
 import { tryClaimAndDispatchNextQueuedPrompt } from './queuedPromptDispatcher';
+import { dispatchQueuedPromptToClaudeCli } from './claudeCliQueueDispatch';
+import { ensureClaudeCliSession } from './claudeCliLauncherSingleton';
 import { supportsWorkspaceSlashWorkflowProvider } from '../../../shared/agentWorkflowProviders';
 
 const execFileAsync = promisify(execFile);
@@ -617,6 +619,23 @@ export class AIService {
     targetWindow: Electron.BrowserWindow | null,
     source: string,
   ): Promise<boolean> {
+    // NIM-834: claude-code-cli sessions have no in-process turn driver — the SDK
+    // dispatch below would call the provider's Phase 1 sendMessage stub and mark
+    // the prompt failed (broke meta-agent spawns, restart continuations, and
+    // scheduled wakeups for CLI sessions). Route them onto the CLI's PTY
+    // queue-drain rails instead: launch the genuine CLI if needed and let the
+    // PID watcher's idle flush deliver the prompt.
+    let dispatchSession: { provider?: string; model?: string | null; worktreeId?: string | null } | null = null;
+    try {
+      const { AISessionsRepository } = await import('@nimbalyst/runtime/storage/repositories/AISessionsRepository');
+      dispatchSession = await AISessionsRepository.get(sessionId);
+    } catch (lookupError) {
+      logger.main.warn(`[AIService] ${source}: provider lookup failed before queued dispatch:`, lookupError);
+    }
+    if (dispatchSession?.provider === 'claude-code-cli') {
+      return this.dispatchQueuedPromptToClaudeCliSession(sessionId, workspacePath, dispatchSession, source);
+    }
+
     const { getQueuedPromptsStore } = await import('../RepositoryManager');
     const queueStore = getQueuedPromptsStore();
 
@@ -676,6 +695,46 @@ export class AIService {
       targetWindow,
       workspacePath,
     });
+  }
+
+  /**
+   * NIM-834: deliver queued prompts to a claude-code-cli session via the CLI
+   * rails (launch + PID-watcher idle flush) instead of the SDK dispatcher.
+   * Worktree-linked sessions spawn the CLI in the worktree so edits land where
+   * the session's view points.
+   */
+  private async dispatchQueuedPromptToClaudeCliSession(
+    sessionId: string,
+    workspacePath: string,
+    session: { model?: string | null; worktreeId?: string | null },
+    source: string,
+  ): Promise<boolean> {
+    let cwd: string | undefined;
+    if (session.worktreeId) {
+      try {
+        const { createWorktreeStore } = await import('../WorktreeStore');
+        const { getDatabase } = await import('../../database/initialize');
+        const db = getDatabase();
+        const worktree = db ? await createWorktreeStore(db).get(session.worktreeId) : null;
+        cwd = worktree?.path ?? undefined;
+      } catch (worktreeError) {
+        logger.main.warn(`[AIService] ${source}: worktree lookup failed for CLI queued dispatch:`, worktreeError);
+      }
+    }
+
+    const terminalManager = getTerminalSessionManager();
+    return dispatchQueuedPromptToClaudeCli(
+      {
+        isTerminalActive: (id) => terminalManager.isTerminalActive(id),
+        ensureSession: (input) => ensureClaudeCliSession(input),
+        getLiveTurnState: (id) => terminalManager.getClaudeCliLiveTurnState(id),
+        getSnapshotStatus: (id) => getSessionStateManager().getSessionState(id)?.status ?? null,
+        flushNext: (id, ws) => flushNextClaudeCliQueuedPromptForSession(id, ws),
+        logInfo: (message) => logger.main.info(`[AIService] ${source}: ${message}`),
+        logWarn: (message) => logger.main.warn(`[AIService] ${source}: ${message}`),
+      },
+      { sessionId, workspacePath, model: session.model, cwd },
+    );
   }
 
   /**
